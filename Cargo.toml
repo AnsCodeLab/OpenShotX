@@ -29,6 +29,7 @@ futures-util = "0.3.31"
 async-trait = "0.1.89"
 image = { version = "0.24.9", features = ["png", "jpeg", "gif"] }
 chrono = "0.4"
+shellexpand = "3"
 
 # OCR
 tesseract = "0.15"

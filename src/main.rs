@@ -16,37 +16,39 @@ use openshotx::{
     recording::{RecordingConfig, start_recording, copy_to_clipboard as copy_recording_to_clipboard},
     scrolling::{ScrollCaptureConfig, capture_scrolling_pw, save_scrolling_capture},
 };
-    use std::path::PathBuf;
-    
-    #[tokio::main]
-    async fn main() {
-        let args: Vec<String> = std::env::args().collect();
-    
-        if args.len() < 2 {
-            print_usage();
-            std::process::exit(1);
+use openshotx::config::Config;
+use std::path::PathBuf;
+
+#[tokio::main]
+async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let config = Config::load();
+
+    if args.len() < 2 {
+        print_usage();
+        std::process::exit(1);
+    }
+
+    match args[1].as_str() {
+        "capture" => {
+            if args.len() < 3 {
+                eprintln!("Error: missing capture type");
+                print_usage();
+                std::process::exit(1);
+            }
+            run_capture(&args, &config);
         }
-    
-        match args[1].as_str() {
-            "capture" => {
-                if args.len() < 3 {
-                    eprintln!("Error: missing capture type");
-                    print_usage();
-                    std::process::exit(1);
-                }
-                run_capture(&args);
+        "record" => {
+            if args.len() < 3 {
+                eprintln!("Error: missing recording type");
+                print_usage();
+                std::process::exit(1);
             }
-            "record" => {
-                if args.len() < 3 {
-                    eprintln!("Error: missing recording type");
-                    print_usage();
-                    std::process::exit(1);
-                }
-                if let Err(e) = run_record(&args).await {
-                    eprintln!("Recording failed: {}", e);
-                    std::process::exit(1);
-                }
+            if let Err(e) = run_record(&args, &config).await {
+                eprintln!("Recording failed: {}", e);
+                std::process::exit(1);
             }
+        }
             "ocr" => {
                 if args.len() < 3 {
                     eprintln!("Error: missing image path");
@@ -112,7 +114,7 @@ use openshotx::{
         println!("  cargo run -- scroll");
     }
     
-    fn run_capture(args: &[String]) {
+fn run_capture(args: &[String], config: &Config) {
         // Parse capture type
         let capture_type = args[2].as_str();
     
@@ -276,20 +278,19 @@ use openshotx::{
             ImageFormat::Png
         };
     
-        let mut config = SaveConfig::default()
+        let output_dir = output_path.unwrap_or_else(|| {
+            PathBuf::from(shellexpand::tilde(&config.paths.screenshots).as_ref())
+        });
+        let effective_prefix = prefix.unwrap_or_else(|| config.capture.prefix.clone());
+
+        let save_config = SaveConfig::default()
             .with_format(format)
-            .with_cursor(include_cursor);
-    
-        if let Some(path) = output_path {
-            config = config.with_output_dir(path);
-        }
-    
-        if let Some(p) = prefix {
-            config = config.with_prefix(p);
-        }
+            .with_cursor(include_cursor)
+            .with_output_dir(output_dir)
+            .with_prefix(effective_prefix);
     
         // Save the capture
-        let saved_path = match save_capture(&capture, &config) {
+        let saved_path = match save_capture(&capture, &save_config) {
             Ok(path) => {
                 println!("Saved to: {}", path.display());
                 path
@@ -420,7 +421,7 @@ use openshotx::{
         }
     }
     
-    async fn run_record(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_record(args: &[String], config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         let record_type = args[2].as_str();
         let mut output_path: Option<PathBuf> = None;
         let mut is_gif = false;
@@ -447,18 +448,18 @@ use openshotx::{
             }
         }
     
-                let mut config = RecordingConfig::default();
-                
-                // Configure output path
+                let mut rec_config = RecordingConfig::default();
+
+                // Configure output path: CLI --output overrides config, else use config.paths.videos
                 if let Some(p) = output_path {
-                    config.output_path = p;
-                    if is_gif && config.output_path.extension().map(|e| e != "gif").unwrap_or(true) {
-                         config.output_path.set_extension("gif");
+                    rec_config.output_path = p;
+                    if is_gif && rec_config.output_path.extension().map(|e| e != "gif").unwrap_or(true) {
+                        rec_config.output_path.set_extension("gif");
                     }
                 } else {
-                    if is_gif {
-                         config.output_path.set_extension("gif");
-                    }
+                    let videos_dir = PathBuf::from(shellexpand::tilde(&config.paths.videos).as_ref());
+                    let filename = if is_gif { "output.gif" } else { "output.mp4" };
+                    rec_config.output_path = videos_dir.join(filename);
                 }
             
                 // Handle area selection if needed
@@ -469,10 +470,10 @@ use openshotx::{
                          
                          let selection = select_area().map_err(|e| format!("Selection failed: {}", e))?;
                          if let Some(area) = selection {
-                             config.x = Some(area.x);
-                             config.y = Some(area.y);
-                             config.width = Some(area.width as u32);
-                             config.height = Some(area.height as u32);
+                             rec_config.x = Some(area.x);
+                             rec_config.y = Some(area.y);
+                             rec_config.width = Some(area.width as u32);
+                             rec_config.height = Some(area.height as u32);
                          } else {
                              println!("Selection cancelled.");
                              return Ok(());
@@ -485,8 +486,8 @@ use openshotx::{
                      eprintln!("Error: recording type '{}' not supported (use 'screen' or 'area')", record_type);
                      std::process::exit(1);
                 }
-            
-                let final_path = start_recording(config).await.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+                let final_path = start_recording(rec_config).await.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
                 
                 // Post-processing
                 if let Some(ext) = final_path.extension() {
