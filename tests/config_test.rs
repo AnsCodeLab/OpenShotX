@@ -1,4 +1,4 @@
-use openshotx::config::{Config, CaptureFormat};
+use openshotx::config::Config;
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -18,7 +18,7 @@ fn round_trip_yaml() {
     cfg.capture.jpeg_quality = 60;
     cfg.hotkeys.capture_area = "Super+Print".to_string();
 
-    let mut f = NamedTempFile::new().unwrap();
+    let f = NamedTempFile::new().unwrap();
     cfg.save_to(f.path()).unwrap();
 
     let loaded = Config::load_from(f.path());
