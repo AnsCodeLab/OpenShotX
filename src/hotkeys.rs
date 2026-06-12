@@ -77,12 +77,15 @@ pub fn register_kde(hotkeys: &HotkeysConfig) -> Result<(), String> {
         ("record-screen",  "openshotx record screen",  hotkeys.record_screen.as_str()),
     ];
     for (id, command, _binding) in &actions {
-        std::process::Command::new("kwriteconfig6")
+        let status = std::process::Command::new("kwriteconfig6")
             .args(["--file", "khotkeysrc",
                    "--group", &format!("openshotx-{}", id),
                    "--key", "Exec", command])
             .status()
             .map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err(format!("kwriteconfig6 exited with {:?}", status.code()));
+        }
     }
     Ok(())
 }
@@ -157,7 +160,12 @@ fn gsettings_get(schema: &str, key: &str) -> Result<String, String> {
 }
 
 fn parse_gvariant_strv(raw: &str) -> Vec<String> {
-    raw.trim_matches(|c| c == '[' || c == ']')
+    let trimmed = raw.trim();
+    if trimmed.starts_with("@as") || trimmed == "[]" {
+        return Vec::new();
+    }
+    trimmed
+        .trim_matches(|c| c == '[' || c == ']')
         .split(',')
         .map(|s| s.trim().trim_matches('\'').to_string())
         .filter(|s| !s.is_empty())
