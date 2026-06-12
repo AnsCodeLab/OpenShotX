@@ -93,6 +93,9 @@ fn build_page(config: &Rc<RefCell<Config>>) -> gtk::ScrolledWindow {
         },
     ];
 
+    // Collect (entry, default_binding_display) for the reset button
+    let mut shortcut_entries: Vec<(gtk::Entry, String)> = Vec::new();
+
     for (i, action) in actions.into_iter().enumerate() {
         let row = (i + 1) as i32;
 
@@ -103,6 +106,7 @@ fn build_page(config: &Rc<RefCell<Config>>) -> gtk::ScrolledWindow {
             .build();
 
         let initial = hotkey_display(&(action.get)(&config.borrow()));
+        let default_val = hotkey_display(&(action.get)(&crate::config::Config::default()));
         let entry = gtk::Entry::builder()
             .text(&initial)
             .width_chars(18)
@@ -116,6 +120,7 @@ fn build_page(config: &Rc<RefCell<Config>>) -> gtk::ScrolledWindow {
             });
         }
 
+        shortcut_entries.push((entry.clone(), default_val));
         grid.attach(&action_lbl, 0, row, 1, 1);
         grid.attach(&entry,      1, row, 1, 1);
     }
@@ -129,8 +134,12 @@ fn build_page(config: &Rc<RefCell<Config>>) -> gtk::ScrolledWindow {
     let reset_btn = gtk::Button::with_label("Reset defaults");
     {
         let cfg = config.clone();
+        let entries = shortcut_entries;
         reset_btn.connect_clicked(move |_| {
             cfg.borrow_mut().hotkeys = crate::config::HotkeysConfig::default();
+            for (entry, default_text) in &entries {
+                entry.set_text(default_text);
+            }
         });
     }
     footer.append(&reset_btn);
