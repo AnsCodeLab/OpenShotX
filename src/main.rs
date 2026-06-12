@@ -125,9 +125,9 @@ fn run_capture(args: &[String], config: &Config) {
     
         // Parse options
         let mut output_path: Option<PathBuf> = None;
-        let mut include_cursor = true;
-        let mut use_jpeg = false;
-        let mut jpeg_quality = 85;
+        let mut include_cursor = config.capture.include_cursor;
+        let mut use_jpeg = matches!(config.capture.format, openshotx::config::CaptureFormat::Jpeg);
+        let mut jpeg_quality = config.capture.jpeg_quality;
         let mut prefix: Option<String> = None;
         let mut run_ocr = false;
         let mut ocr_lang: Option<String> = None;
@@ -307,7 +307,7 @@ fn run_capture(args: &[String], config: &Config) {
         };
 
         // Copy image to clipboard (for non-OCR captures, OCR has its own clipboard handling)
-        if !run_ocr {
+        if !run_ocr && config.capture.copy_to_clipboard {
             if let Err(e) = copy_image_to_clipboard(&saved_path) {
                 eprintln!("Warning: Failed to copy image to clipboard: {}", e);
             }

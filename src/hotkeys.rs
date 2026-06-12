@@ -12,19 +12,19 @@ pub enum Desktop {
 }
 
 pub fn detect_desktop() -> Desktop {
-    match std::env::var("XDG_CURRENT_DESKTOP")
-        .unwrap_or_default()
-        .to_uppercase()
-        .as_str()
-    {
-        "GNOME" => Desktop::Gnome,
-        "KDE" => Desktop::Kde,
-        "XFCE" => Desktop::Xfce,
-        "SWAY" => Desktop::Sway,
-        "I3" => Desktop::I3,
-        "HYPRLAND" => Desktop::Hyprland,
-        _ => Desktop::Unknown,
+    let var = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    for part in var.split(':') {
+        match part.to_uppercase().as_str() {
+            "GNOME"    => return Desktop::Gnome,
+            "KDE"      => return Desktop::Kde,
+            "XFCE"     => return Desktop::Xfce,
+            "SWAY"     => return Desktop::Sway,
+            "I3"       => return Desktop::I3,
+            "HYPRLAND" => return Desktop::Hyprland,
+            _ => {}
+        }
     }
+    Desktop::Unknown
 }
 
 /// Converts gsettings binding format "<Super><Shift>4" → "Super+Shift+4" for display.
@@ -76,15 +76,16 @@ pub fn register_kde(hotkeys: &HotkeysConfig) -> Result<(), String> {
         ("record-area",    "openshotx record area",    hotkeys.record_area.as_str()),
         ("record-screen",  "openshotx record screen",  hotkeys.record_screen.as_str()),
     ];
-    for (id, command, _binding) in &actions {
-        let status = std::process::Command::new("kwriteconfig6")
-            .args(["--file", "khotkeysrc",
-                   "--group", &format!("openshotx-{}", id),
-                   "--key", "Exec", command])
-            .status()
-            .map_err(|e| e.to_string())?;
-        if !status.success() {
-            return Err(format!("kwriteconfig6 exited with {:?}", status.code()));
+    for (id, command, binding) in &actions {
+        let group = format!("openshotx-{}", id);
+        for (key, value) in &[("Exec", *command), ("Keys", binding)] {
+            let status = std::process::Command::new("kwriteconfig6")
+                .args(["--file", "khotkeysrc", "--group", &group, "--key", key, value])
+                .status()
+                .map_err(|e| e.to_string())?;
+            if !status.success() {
+                return Err(format!("kwriteconfig6 --key {} exited with {:?}", key, status.code()));
+            }
         }
     }
     Ok(())
@@ -167,7 +168,7 @@ fn parse_gvariant_strv(raw: &str) -> Vec<String> {
     trimmed
         .trim_matches(|c| c == '[' || c == ']')
         .split(',')
-        .map(|s| s.trim().trim_matches('\'').to_string())
+        .map(|s| s.trim().trim_matches(|c| c == '\'' || c == '"').to_string())
         .filter(|s| !s.is_empty())
         .collect()
 }
