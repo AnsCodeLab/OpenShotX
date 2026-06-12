@@ -6,7 +6,6 @@ mod hotkeys_tab;
 use crate::config::Config;
 use gtk4::{self as gtk, prelude::*};
 use libadwaita as adw;
-use adw::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 

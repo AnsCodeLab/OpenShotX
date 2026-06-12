@@ -33,6 +33,10 @@ i'm building this while assisted by LLMs. it's fine if you don't approve etc, i 
 
 **Note:** Keyboard shortcuts are not included - you'll need to configure your own based on your window manager/desktop environment.
 
+**configuration:**
+- `openshotx config` - open settings GUI (paths, capture defaults, recording defaults, hotkeys)
+- config stored at `~/.config/openshotx/config.yaml`
+
 All captures save to ~/Pictures (screenshots) or ~/Videos (recordings) by default. use `--output /some/path` to change.
 
 ## options
