@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod config;
 pub mod capture;
 pub mod overlay;
 pub mod ocr;
