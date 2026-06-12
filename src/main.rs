@@ -17,6 +17,7 @@ use openshotx::{
     scrolling::{ScrollCaptureConfig, capture_scrolling_pw, save_scrolling_capture},
 };
 use openshotx::config::Config;
+use openshotx::gui;
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -63,7 +64,10 @@ async fn main() {
                     std::process::exit(1);
                 }
             }
-            "--help" | "-h" => print_usage(),
+            "config" => {
+            gui::run_settings(config);
+        }
+        "--help" | "-h" => print_usage(),
             _ => {
                 eprintln!("Error: unknown command '{}'", args[1]);
                 print_usage();
@@ -82,6 +86,7 @@ async fn main() {
         println!("  record <type>     Record video (MP4/GIF)");
         println!("  ocr <image>       Extract text from an image");
         println!("  scroll            Capture scrolling content (auto-stitch frames)");
+        println!("  config            Open the settings GUI");
         println!();
         println!("Capture types:");
         println!("  screen            Capture the entire screen");

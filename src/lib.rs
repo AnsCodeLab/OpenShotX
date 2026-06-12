@@ -1,6 +1,7 @@
 pub mod backend;
 pub mod config;
 pub mod hotkeys;
+pub mod gui;
 pub mod capture;
 pub mod overlay;
 pub mod ocr;
