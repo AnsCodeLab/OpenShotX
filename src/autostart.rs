@@ -30,7 +30,7 @@ fn entry_contents(exec: &Path) -> String {
          Type=Application\n\
          Name=OpenShotX Tray\n\
          Comment=OpenShotX system tray (quick capture)\n\
-         Exec={} tray\n\
+         Exec={} tray --hidden\n\
          Icon=openshotx\n\
          Terminal=false\n\
          Categories=Graphics;\n\

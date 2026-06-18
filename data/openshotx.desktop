@@ -3,12 +3,14 @@ Type=Application
 Name=OpenShotX
 GenericName=Screenshot Tool
 Comment=Capture screenshots and recordings (X11 and Wayland)
-Exec=openshotx config
+Exec=openshotx tray
 Icon=openshotx
 Terminal=false
 Categories=Graphics;
 Keywords=screenshot;capture;record;ocr;screen;snip;
 StartupNotify=true
+# Matches the GtkApplication id so GNOME maps the window to this entry's icon.
+StartupWMClass=io.github.anscodelab.openshotx.tray
 Actions=capture-area;capture-screen;record-screen;
 
 [Desktop Action capture-area]

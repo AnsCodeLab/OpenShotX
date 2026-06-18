@@ -1,20 +1,58 @@
 //! System tray icon (StatusNotifierItem) providing one-click capture actions.
 //!
-//! Built on `ksni` (pure-Rust SNI over D-Bus). Each menu item launches the
-//! OpenShotX CLI as a child process, reusing all existing capture/record/OCR
-//! logic and isolating the portal + GTK overlay from the tray's event loop.
+//! Built on `ksni` (pure-Rust SNI over D-Bus). Capture/record items launch the
+//! OpenShotX CLI as child processes (reusing all existing logic). "Settings…"
+//! and "Quit" are routed to the GTK side via an [`async_channel`] so a single
+//! process owns both the tray and the settings window (see [`crate::gui`]).
 //!
 //! Requires an SNI host on the session bus (KDE natively; GNOME via the
 //! AppIndicator extension). With no host the daemon runs but shows no icon.
 
 use ksni::menu::StandardItem;
-use ksni::{MenuItem, Tray, TrayMethods};
+use ksni::{Icon, MenuItem, Tray, TrayMethods};
 use std::process::Command;
-use tokio::sync::mpsc;
+use std::sync::OnceLock;
 
-/// The tray menu state. Holds a shutdown signal fired by the Quit item.
+/// PNG used for the tray pixmap, rendered from `data/openshotx.svg`.
+const ICON_PNG: &[u8] = include_bytes!("../../data/openshotx-tray.png");
+
+/// Decode the embedded PNG into an SNI [`Icon`] (ARGB32, network byte order).
+/// Cached after first use. Returns empty on decode failure (falls back to name).
+fn icon_pixmaps() -> &'static Vec<Icon> {
+    static ICON: OnceLock<Vec<Icon>> = OnceLock::new();
+    ICON.get_or_init(|| {
+        match image::load_from_memory_with_format(ICON_PNG, image::ImageFormat::Png) {
+            Ok(img) => {
+                let (width, height) = (img.width() as i32, img.height() as i32);
+                let mut data = img.into_rgba8().into_vec();
+                // RGBA -> ARGB by rotating each pixel's bytes right by one.
+                for px in data.chunks_exact_mut(4) {
+                    px.rotate_right(1);
+                }
+                vec![Icon { width, height, data }]
+            }
+            Err(e) => {
+                eprintln!("tray: failed to decode embedded icon: {}", e);
+                Vec::new()
+            }
+        }
+    })
+}
+
+/// Messages the tray (background thread) sends to the GTK main thread.
+#[derive(Debug, Clone, Copy)]
+pub enum TrayMsg {
+    /// The tray icon registered with a host and is now visible.
+    Registered,
+    /// Show / focus the settings window.
+    ShowSettings,
+    /// Quit the whole application.
+    Quit,
+}
+
+/// The tray menu state. Holds a channel to the GTK main thread.
 struct OpenShotXTray {
-    shutdown: mpsc::Sender<()>,
+    tx: async_channel::Sender<TrayMsg>,
 }
 
 /// Spawn the OpenShotX binary with `args`, detached. Logs failures; never panics.
@@ -41,6 +79,18 @@ fn action_item(label: &str, args: &'static [&'static str]) -> MenuItem<OpenShotX
     .into()
 }
 
+/// Build a menu item that sends `msg` to the GTK main thread.
+fn msg_item(label: &str, msg: TrayMsg) -> MenuItem<OpenShotXTray> {
+    StandardItem {
+        label: label.into(),
+        activate: Box::new(move |this: &mut OpenShotXTray| {
+            let _ = this.tx.try_send(msg);
+        }),
+        ..Default::default()
+    }
+    .into()
+}
+
 impl Tray for OpenShotXTray {
     fn id(&self) -> String {
         "openshotx".into()
@@ -50,8 +100,18 @@ impl Tray for OpenShotXTray {
         "OpenShotX".into()
     }
 
+    // Empty name forces the host to use icon_pixmap below. The GNOME
+    // AppIndicator extension prefers IconName and won't fall back to the pixmap
+    // if the name is set but unresolvable (GNOME Shell's icon cache often lacks
+    // a freshly-installed "openshotx"), so we deliberately leave it empty.
     fn icon_name(&self) -> String {
-        "openshotx".into()
+        String::new()
+    }
+
+    // Embed the pixel data directly so the icon renders regardless of whether
+    // the host can resolve a themed icon name.
+    fn icon_pixmap(&self) -> Vec<Icon> {
+        icon_pixmaps().clone()
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
@@ -62,15 +122,8 @@ impl Tray for OpenShotXTray {
             action_item("Record Screen", &["record", "screen", "--notify"]),
             action_item("Capture & OCR Text", &["capture", "area", "--ocr", "--notify"]),
             MenuItem::Separator,
-            action_item("Settings…", &["config"]),
-            StandardItem {
-                label: "Quit".into(),
-                activate: Box::new(|this: &mut OpenShotXTray| {
-                    let _ = this.shutdown.try_send(());
-                }),
-                ..Default::default()
-            }
-            .into(),
+            msg_item("Settings…", TrayMsg::ShowSettings),
+            msg_item("Quit", TrayMsg::Quit),
         ]
     }
 }
@@ -81,42 +134,55 @@ impl Tray for OpenShotXTray {
 const MAX_REGISTER_ATTEMPTS: u32 = 10;
 const RETRY_DELAY_SECS: u64 = 2;
 
-/// Run the tray daemon until the user selects Quit (or the SNI service dies).
-pub async fn run_tray() {
-    let (tx, mut rx) = mpsc::channel::<()>(1);
-
-    let mut handle = None;
-    for attempt in 1..=MAX_REGISTER_ATTEMPTS {
-        let tray = OpenShotXTray { shutdown: tx.clone() };
-        match tray.spawn().await {
-            Ok(h) => {
-                handle = Some(h);
-                break;
-            }
-            Err(e) if attempt < MAX_REGISTER_ATTEMPTS => {
-                eprintln!(
-                    "tray: no StatusNotifier host yet ({}); retry {}/{} in {}s",
-                    e, attempt, MAX_REGISTER_ATTEMPTS, RETRY_DELAY_SECS
-                );
-                tokio::time::sleep(std::time::Duration::from_secs(RETRY_DELAY_SECS)).await;
-            }
+/// Spawn the ksni tray on a dedicated thread with its own current-thread Tokio
+/// runtime. The thread lives until the process exits. Menu activations send
+/// [`TrayMsg`]s through `tx`.
+pub fn spawn_tray_thread(tx: async_channel::Sender<TrayMsg>) {
+    let builder = std::thread::Builder::new().name("openshotx-tray".into());
+    let spawn_result = builder.spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt,
             Err(e) => {
-                eprintln!(
-                    "Failed to start tray after {} attempts (is a StatusNotifier host \
-                     running? On GNOME, enable the AppIndicator extension): {}",
-                    MAX_REGISTER_ATTEMPTS, e
-                );
-                std::process::exit(1);
+                eprintln!("tray: failed to start runtime: {}", e);
+                return;
             }
-        }
-    }
-    let handle = handle.expect("tray handle set on success");
-
-    println!("OpenShotX tray running. Select Quit from the menu to exit.");
-
-    // Park until Quit is chosen or the tray service shuts down on its own.
-    tokio::select! {
-        _ = rx.recv() => {}
-        _ = handle.shutdown() => {}
+        };
+        rt.block_on(async move {
+            let mut handle = None;
+            for attempt in 1..=MAX_REGISTER_ATTEMPTS {
+                let tray = OpenShotXTray { tx: tx.clone() };
+                match tray.spawn().await {
+                    Ok(h) => {
+                        handle = Some(h);
+                        break;
+                    }
+                    Err(e) if attempt < MAX_REGISTER_ATTEMPTS => {
+                        eprintln!(
+                            "tray: no StatusNotifier host yet ({}); retry {}/{} in {}s",
+                            e, attempt, MAX_REGISTER_ATTEMPTS, RETRY_DELAY_SECS
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(RETRY_DELAY_SECS)).await;
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "tray: failed to register after {} attempts (is a StatusNotifier \
+                             host running? On GNOME, enable the AppIndicator extension): {}",
+                            MAX_REGISTER_ATTEMPTS, e
+                        );
+                        return;
+                    }
+                }
+            }
+            if let Some(handle) = handle {
+                eprintln!("tray: registered StatusNotifierItem with the watcher");
+                // Tell the GTK side the icon is live, so "minimize to tray" is safe.
+                let _ = tx.try_send(TrayMsg::Registered);
+                // Park until the SNI service shuts down (or the process exits).
+                handle.shutdown().await;
+            }
+        });
+    });
+    if let Err(e) = spawn_result {
+        eprintln!("tray: failed to spawn tray thread: {}", e);
     }
 }

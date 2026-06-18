@@ -18,7 +18,6 @@ use openshotx::{
 };
 use openshotx::config::Config;
 use openshotx::gui;
-use openshotx::tray;
 use std::path::{Path, PathBuf};
 
 #[tokio::main]
@@ -69,7 +68,8 @@ async fn main() {
             gui::run_settings(config);
         }
         "tray" => {
-            tray::run_tray().await;
+            let start_hidden = args.iter().any(|a| a == "--hidden" || a == "--minimized");
+            gui::run_tray_app(config, start_hidden);
         }
         "--help" | "-h" => print_usage(),
             _ => {
@@ -91,7 +91,8 @@ async fn main() {
         println!("  ocr <image>       Extract text from an image");
         println!("  scroll            Capture scrolling content (auto-stitch frames)");
         println!("  config            Open the settings GUI");
-        println!("  tray              Run the system tray icon (quick capture menu)");
+        println!("  tray [--hidden]   Run the tray icon + settings window");
+        println!("                    (--hidden starts in the tray only; used by autostart)");
         println!();
         println!("Capture types:");
         println!("  screen            Capture the entire screen");

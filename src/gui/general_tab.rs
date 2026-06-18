@@ -4,13 +4,17 @@ use gtk4::{self as gtk, prelude::*};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-pub fn append_to(notebook: &gtk::Notebook, config: &Rc<RefCell<Config>>) {
-    let page = build_page(config);
+pub fn append_to(
+    notebook: &gtk::Notebook,
+    config: &Rc<RefCell<Config>>,
+    minimize: Option<Rc<dyn Fn()>>,
+) {
+    let page = build_page(config, minimize);
     let label = gtk::Label::new(Some("General"));
     notebook.append_page(&page, Some(&label));
 }
 
-fn build_page(config: &Rc<RefCell<Config>>) -> gtk::ScrolledWindow {
+fn build_page(config: &Rc<RefCell<Config>>, minimize: Option<Rc<dyn Fn()>>) -> gtk::ScrolledWindow {
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 16);
     vbox.set_margin_top(20);
     vbox.set_margin_bottom(20);
@@ -36,6 +40,17 @@ fn build_page(config: &Rc<RefCell<Config>>) -> gtk::ScrolledWindow {
     ));
 
     vbox.append(&autostart_row(config));
+
+    // "Minimize to tray" action, placed right under the autostart toggle.
+    if let Some(minimize) = minimize {
+        let btn = gtk::Button::with_label("Minimize to tray");
+        btn.set_halign(gtk::Align::End);
+        btn.set_tooltip_text(Some(
+            "Hide this window to the system tray (minimizes normally if the tray icon isn't available)",
+        ));
+        btn.connect_clicked(move |_| minimize());
+        vbox.append(&btn);
+    }
 
     gtk::ScrolledWindow::builder()
         .child(&vbox)
