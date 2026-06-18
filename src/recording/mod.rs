@@ -351,12 +351,35 @@ async fn build_pipeline(config: &RecordingConfig, profile: &EncoderProfile, outp
     ))
 }
 
+fn screencast_token_path() -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("~/.config"))
+        .join("openshotx")
+        .join("screencast_token")
+}
+
+pub fn load_screencast_token() -> Option<String> {
+    std::fs::read_to_string(screencast_token_path()).ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+pub fn save_screencast_token(token: &str) {
+    let path = screencast_token_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, token);
+}
+
 async fn get_wayland_source() -> RecordResult<String> {
     use ashpd::desktop::screencast::Screencast;
     use zbus::zvariant::Value;
 
     println!("Requesting Wayland ScreenCast session...");
-    
+
+    let restore_token = load_screencast_token();
+
     let proxy = Screencast::new().await
         .map_err(|e| RecordError::PortalError(e.to_string()))?;
 
@@ -365,18 +388,20 @@ async fn get_wayland_source() -> RecordResult<String> {
 
     let connection = proxy.connection();
 
-    // 1. Select Sources
+    // 1. Select Sources — Persistent mode so the compositor remembers the choice
     proxy.select_sources(
         &session,
         ashpd::desktop::screencast::CursorMode::Embedded,
         ashpd::desktop::screencast::SourceType::Monitor | ashpd::desktop::screencast::SourceType::Window,
         false, // multiple
-        None,
-        ashpd::desktop::PersistMode::DoNot,
+        restore_token.as_deref(),
+        ashpd::desktop::PersistMode::ExplicitlyRevoked,
     ).await.map_err(|e| RecordError::PortalError(e.to_string()))?;
 
-    println!("Please select a screen or window to record...");
-    
+    if restore_token.is_none() {
+        println!("Please select a screen or window to record...");
+    }
+
     // 2. Start
     let msg = connection.call_method(
         Some("org.freedesktop.portal.Desktop"),
@@ -385,11 +410,20 @@ async fn get_wayland_source() -> RecordResult<String> {
         "Start",
         &(&session, "", HashMap::<String, Value>::new()),
     ).await.map_err(|e| RecordError::PortalError(format!("Start call failed: {}", e)))?;
-    
+
     let request_path: zbus::zvariant::OwnedObjectPath = msg.body().deserialize()
         .map_err(|e| RecordError::PortalError(format!("Failed to parse Start response: {}", e)))?;
-        
+
     let results: HashMap<String, OwnedValue> = wait_for_response(connection, &request_path).await?;
+
+    // Save restore token if the portal returned one
+    if let Some(token_value) = results.get("restore_token") {
+        if let Ok(token) = String::try_from(token_value.try_clone().unwrap()) {
+            if !token.is_empty() {
+                save_screencast_token(&token);
+            }
+        }
+    }
 
     let streams_value = results.get("streams")
         .ok_or_else(|| RecordError::PortalError("No streams in portal response".into()))?;

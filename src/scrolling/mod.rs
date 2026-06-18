@@ -248,8 +248,12 @@ pub async fn capture_scrolling_pw(config: &ScrollCaptureConfig) -> ScrollResult<
     gst::init()
         .map_err(|e| ScrollError::GStreamerError(format!("Failed to init GStreamer: {}", e)))?;
 
+    let restore_token = crate::recording::load_screencast_token();
+
     println!("Setting up scrolling capture...");
-    println!("Please select the area you want to capture scrolling content from...");
+    if restore_token.is_none() {
+        println!("Please select the area you want to capture scrolling content from...");
+    }
 
     // Setup PipeWire screencast portal
     let proxy = Screencast::new().await
@@ -260,14 +264,14 @@ pub async fn capture_scrolling_pw(config: &ScrollCaptureConfig) -> ScrollResult<
 
     let connection = proxy.connection();
 
-    // Select sources
+    // Select sources — Persistent mode so the compositor remembers the choice
     proxy.select_sources(
         &session,
         CursorMode::Embedded,
         SourceType::Monitor | SourceType::Window,
         false,
-        None,
-        PersistMode::DoNot,
+        restore_token.as_deref(),
+        PersistMode::ExplicitlyRevoked,
     ).await.map_err(|e| ScrollError::PortalError(format!("Failed to select sources: {}", e)))?;
 
     // Start the screencast
@@ -283,6 +287,15 @@ pub async fn capture_scrolling_pw(config: &ScrollCaptureConfig) -> ScrollResult<
         .map_err(|e| ScrollError::PortalError(format!("Failed to parse Start response: {}", e)))?;
 
     let results: HashMap<String, OwnedValue> = wait_for_response(connection, &request_path).await?;
+
+    // Save restore token if the portal returned one
+    if let Some(token_value) = results.get("restore_token") {
+        if let Ok(token) = String::try_from(token_value.try_clone().unwrap()) {
+            if !token.is_empty() {
+                crate::recording::save_screencast_token(&token);
+            }
+        }
+    }
 
     let streams_value = results.get("streams")
         .ok_or_else(|| ScrollError::PortalError("No streams in portal response".into()))?;
