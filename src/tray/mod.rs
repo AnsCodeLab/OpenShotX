@@ -50,9 +50,53 @@ pub enum TrayMsg {
     Quit,
 }
 
-/// The tray menu state. Holds a channel to the GTK main thread.
+/// The tray menu state. Holds a channel to the GTK main thread and, while a
+/// screen recording is running, that child process so it can be stopped.
 struct OpenShotXTray {
     tx: async_channel::Sender<TrayMsg>,
+    recording: Option<std::process::Child>,
+}
+
+impl OpenShotXTray {
+    /// Start a screen recording as a child process, tracking it so it can be
+    /// stopped from the menu. On Wayland this triggers the portal share dialog.
+    fn start_recording(&mut self) {
+        // Reap any previous child that already exited on its own.
+        if let Some(child) = self.recording.as_mut() {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                self.recording = None;
+            } else {
+                return; // already recording
+            }
+        }
+        let exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("tray: cannot resolve current executable: {}", e);
+                return;
+            }
+        };
+        match Command::new(&exe).args(["record", "screen", "--notify"]).spawn() {
+            Ok(child) => self.recording = Some(child),
+            Err(e) => eprintln!("tray: failed to start recording: {}", e),
+        }
+    }
+
+    /// Stop the running recording by sending SIGINT (the record command only
+    /// finalizes the file cleanly on SIGINT), then reap it off-thread so the
+    /// menu callback never blocks while GStreamer flushes end-of-stream.
+    fn stop_recording(&mut self) {
+        if let Some(child) = self.recording.take() {
+            let pid = child.id() as libc::pid_t;
+            // SAFETY: sending a signal to a pid we own; errors are ignored.
+            unsafe { libc::kill(pid, libc::SIGINT) };
+            std::thread::spawn(move || {
+                let mut child = child;
+                let _ = child.wait();
+            });
+        }
+    }
+
 }
 
 /// Spawn the OpenShotX binary with `args`, detached. Logs failures; never panics.
@@ -115,11 +159,29 @@ impl Tray for OpenShotXTray {
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
+        // While recording, the item toggles to a stop action. Mutating the tray
+        // in either callback makes ksni re-render the menu automatically.
+        let record_item: MenuItem<Self> = if self.recording.is_some() {
+            StandardItem {
+                label: "⏹ Stop Recording".into(),
+                activate: Box::new(|this: &mut OpenShotXTray| this.stop_recording()),
+                ..Default::default()
+            }
+            .into()
+        } else {
+            StandardItem {
+                label: "Record Screen".into(),
+                activate: Box::new(|this: &mut OpenShotXTray| this.start_recording()),
+                ..Default::default()
+            }
+            .into()
+        };
+
         vec![
             action_item("Capture Area", &["capture", "area", "--notify"]),
             action_item("Capture Screen", &["capture", "screen", "--notify"]),
             action_item("Capture Window", &["capture", "window", "--notify"]),
-            action_item("Record Screen", &["record", "screen", "--notify"]),
+            record_item,
             action_item("Capture & OCR Text", &["capture", "area", "--ocr", "--notify"]),
             MenuItem::Separator,
             msg_item("Settings…", TrayMsg::ShowSettings),
@@ -150,7 +212,7 @@ pub fn spawn_tray_thread(tx: async_channel::Sender<TrayMsg>) {
         rt.block_on(async move {
             let mut handle = None;
             for attempt in 1..=MAX_REGISTER_ATTEMPTS {
-                let tray = OpenShotXTray { tx: tx.clone() };
+                let tray = OpenShotXTray { tx: tx.clone(), recording: None };
                 match tray.spawn().await {
                     Ok(h) => {
                         handle = Some(h);

@@ -39,6 +39,7 @@ gstreamer-app = "0.24.4"
 gstreamer-video = "0.24.4"
 ksni = "0.3.5"
 async-channel = "2.5.0"
+libc = "0.2.186"
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"  # better test output
