@@ -144,16 +144,10 @@ impl Tray for OpenShotXTray {
         "OpenShotX".into()
     }
 
-    // Empty name forces the host to use icon_pixmap below. The GNOME
-    // AppIndicator extension prefers IconName and won't fall back to the pixmap
-    // if the name is set but unresolvable (GNOME Shell's icon cache often lacks
-    // a freshly-installed "openshotx"), so we deliberately leave it empty.
     fn icon_name(&self) -> String {
-        String::new()
+        "openshotx".into()
     }
 
-    // Embed the pixel data directly so the icon renders regardless of whether
-    // the host can resolve a themed icon name.
     fn icon_pixmap(&self) -> Vec<Icon> {
         icon_pixmaps().clone()
     }
