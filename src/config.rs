@@ -11,6 +11,8 @@ pub struct Config {
     pub recording: RecordingConfig,
     #[serde(default)]
     pub hotkeys: HotkeysConfig,
+    #[serde(default)]
+    pub tray: TrayConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -73,6 +75,20 @@ pub struct HotkeysConfig {
     pub record_area: String,
     #[serde(default = "default_record_screen")]
     pub record_screen: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrayConfig {
+    /// Launch the tray icon automatically on login.
+    /// The autostart .desktop file is the source of truth; this mirrors it.
+    #[serde(default)]
+    pub autostart: bool,
+}
+
+impl Default for TrayConfig {
+    fn default() -> Self {
+        Self { autostart: false }
+    }
 }
 
 fn default_screenshots() -> String { "~/Pictures".to_string() }
@@ -140,6 +156,7 @@ impl Default for Config {
             capture: CaptureConfig::default(),
             recording: RecordingConfig::default(),
             hotkeys: HotkeysConfig::default(),
+            tray: TrayConfig::default(),
         }
     }
 }

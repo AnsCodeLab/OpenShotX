@@ -18,6 +18,7 @@ use openshotx::{
 };
 use openshotx::config::Config;
 use openshotx::gui;
+use openshotx::tray;
 use std::path::{Path, PathBuf};
 
 #[tokio::main]
@@ -67,6 +68,9 @@ async fn main() {
             "config" => {
             gui::run_settings(config);
         }
+        "tray" => {
+            tray::run_tray().await;
+        }
         "--help" | "-h" => print_usage(),
             _ => {
                 eprintln!("Error: unknown command '{}'", args[1]);
@@ -87,6 +91,7 @@ async fn main() {
         println!("  ocr <image>       Extract text from an image");
         println!("  scroll            Capture scrolling content (auto-stitch frames)");
         println!("  config            Open the settings GUI");
+        println!("  tray              Run the system tray icon (quick capture menu)");
         println!();
         println!("Capture types:");
         println!("  screen            Capture the entire screen");
@@ -100,6 +105,7 @@ async fn main() {
         println!("  --prefix <text>   Prefix for filename (default: 'screenshot')");
         println!("  --ocr             Run OCR on captured image and copy to clipboard");
         println!("  --open, --edit    Open the screenshot in an editor after saving");
+        println!("  --notify          Show a desktop notification when done");
         println!();
         println!("Recording options:");
         println!("  --output <path>   Save to specific path (default: ~/Videos/output.mp4)");
@@ -132,6 +138,7 @@ fn run_capture(args: &[String], config: &Config) {
         let mut prefix: Option<String> = None;
         let mut run_ocr = false;
         let mut open_after = false;
+        let mut notify = false;
         let mut ocr_lang: Option<String> = None;
         let mut ocr_min_conf: Option<i32> = None;
         let mut ocr_clipboard = true;
@@ -179,6 +186,10 @@ fn run_capture(args: &[String], config: &Config) {
                 }
                 "--open" | "--edit" => {
                     open_after = true;
+                    i += 1;
+                }
+                "--notify" => {
+                    notify = true;
                     i += 1;
                 }
                 "--lang" => {
@@ -325,6 +336,11 @@ fn run_capture(args: &[String], config: &Config) {
                 eprintln!("Warning: Failed to open screenshot: {}", e);
             }
         }
+
+        // Desktop notification for non-OCR captures (OCR notifies after extraction)
+        if notify && !run_ocr {
+            send_notification("Screenshot saved", &saved_path.display().to_string());
+        }
     
         // Run OCR if requested
         if run_ocr {
@@ -351,13 +367,36 @@ fn run_capture(args: &[String], config: &Config) {
                     if result.copied_to_clipboard {
                         println!("Text copied to clipboard");
                     }
+                    if notify {
+                        let body = if result.copied_to_clipboard {
+                            "Text copied to clipboard".to_string()
+                        } else {
+                            format!("{}% confidence", result.confidence)
+                        };
+                        send_notification("OCR complete", &body);
+                    }
                 }
                 Err(e) => {
                     eprintln!("OCR failed: {}", e);
+                    if notify {
+                        send_notification("OCR failed", &e.to_string());
+                    }
                     std::process::exit(1);
                 }
             }
         }
+    }
+
+    /// Send a desktop notification via `notify-send`.
+    ///
+    /// Best-effort: if `notify-send` is missing or fails, it is silently ignored
+    /// so capture flows never break on notification problems.
+    fn send_notification(summary: &str, body: &str) {
+        let _ = std::process::Command::new("notify-send")
+            .arg("--app-name=OpenShotX")
+            .arg(summary)
+            .arg(body)
+            .spawn();
     }
 
     /// Open a saved screenshot in an editor.
@@ -465,7 +504,8 @@ async fn run_record(args: &[String], config: &Config) -> Result<(), Box<dyn std:
         let record_type = args[2].as_str();
         let mut output_path: Option<PathBuf> = None;
         let mut is_gif = false;
-    
+        let mut notify = false;
+
         let mut i = 3;
         while i < args.len() {
             match args[i].as_str() {
@@ -479,6 +519,10 @@ async fn run_record(args: &[String], config: &Config) -> Result<(), Box<dyn std:
                 }
                 "--gif" => {
                     is_gif = true;
+                    i += 1;
+                }
+                "--notify" => {
+                    notify = true;
                     i += 1;
                 }
                 _ => {
@@ -538,7 +582,11 @@ async fn run_record(args: &[String], config: &Config) -> Result<(), Box<dyn std:
                         }
                     }
                 }
-            
+
+                if notify {
+                    send_notification("Recording saved", &final_path.display().to_string());
+                }
+
                 Ok(())
             }
 

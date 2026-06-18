@@ -1,3 +1,4 @@
+use crate::autostart;
 use crate::config::Config;
 use gtk4::{self as gtk, prelude::*};
 use std::cell::RefCell;
@@ -34,10 +35,74 @@ fn build_page(config: &Rc<RefCell<Config>>) -> gtk::ScrolledWindow {
         },
     ));
 
+    vbox.append(&autostart_row(config));
+
     gtk::ScrolledWindow::builder()
         .child(&vbox)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build()
+}
+
+/// Switch to enable/disable launching the tray icon on login.
+///
+/// The autostart `.desktop` file is written/removed immediately on toggle (so
+/// the change takes effect even without pressing Save); the config bool is kept
+/// in sync and persisted on Save.
+fn autostart_row(config: &Rc<RefCell<Config>>) -> gtk::Box {
+    let enabled = autostart::is_enabled();
+    config.borrow_mut().tray.autostart = enabled;
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+
+    let labels = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    labels.set_hexpand(true);
+    let title = gtk::Label::builder()
+        .label("Start tray icon on login")
+        .halign(gtk::Align::Start)
+        .build();
+    let subtitle = gtk::Label::builder()
+        .label("Quick-capture menu in the system tray")
+        .halign(gtk::Align::Start)
+        .css_classes(["caption", "dim-label"])
+        .build();
+    labels.append(&title);
+    labels.append(&subtitle);
+
+    let switch = gtk::Switch::builder()
+        .active(enabled)
+        .valign(gtk::Align::Center)
+        .build();
+
+    let cfg = config.clone();
+    switch.connect_state_set(move |sw, state| {
+        let result = if state { autostart::enable() } else { autostart::disable() };
+        match result {
+            Ok(()) => {
+                cfg.borrow_mut().tray.autostart = state;
+                glib_propagate(false)
+            }
+            Err(e) => {
+                eprintln!("Failed to update autostart: {}", e);
+                // Revert the switch to the real state on failure.
+                sw.set_active(autostart::is_enabled());
+                glib_propagate(true)
+            }
+        }
+    });
+
+    row.append(&labels);
+    row.append(&switch);
+    row
+}
+
+/// `connect_state_set` expects a `glib::Propagation`; this keeps the call sites
+/// readable. `true` stops further default handling.
+fn glib_propagate(stop: bool) -> gtk::glib::Propagation {
+    if stop {
+        gtk::glib::Propagation::Stop
+    } else {
+        gtk::glib::Propagation::Proceed
+    }
 }
 
 fn path_row<F: Fn(String) + 'static>(label: &str, initial: &str, on_change: F) -> gtk::Box {

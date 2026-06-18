@@ -31,10 +31,15 @@ i'm building this while assisted by LLMs. it's fine if you don't approve etc, i 
 **scrolling capture (beta - see SCROLLING_CAPTURE.md for known issues):**
 - `openshotx scroll` - capture scrolling content by stitching overlapping frames
 
+**system tray (quick-capture menu):**
+- `openshotx tray` - resident tray icon: Capture Area/Screen/Window, Record Screen, Capture & OCR Text, Settings, Quit
+- enable "Start tray icon on login" in the settings GUI (General tab) to autostart it
+- uses the StatusNotifierItem protocol. works natively on KDE; on **GNOME you need the [AppIndicator extension](https://extensions.gnome.org/extension/615/appindicator-support/)** installed *and active* (on Wayland, activating a freshly-enabled extension needs a logout/login)
+
 **Note:** Keyboard shortcuts are not included - you'll need to configure your own based on your window manager/desktop environment.
 
 **configuration:**
-- `openshotx config` - open settings GUI (paths, capture defaults, recording defaults, hotkeys)
+- `openshotx config` - open settings GUI (paths, capture defaults, recording defaults, hotkeys, tray autostart)
 - config stored at `~/.config/openshotx/config.yaml`
 
 All captures save to ~/Pictures (screenshots) or ~/Videos (recordings) by default. use `--output /some/path` to change.

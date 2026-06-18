@@ -37,6 +37,7 @@ arboard = { version = "3.6", features = ["wayland-data-control"] }
 gstreamer = "0.24.4"
 gstreamer-app = "0.24.4"
 gstreamer-video = "0.24.4"
+ksni = "0.3.5"
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"  # better test output
