@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.anscodelab.openshotx</id>
+  <metadata_license>FSFAP</metadata_license>
+  <project_license>WTFPL</project_license>
+  <name>OpenShotX</name>
+  <summary>Screenshot and screen-recording tool for Linux</summary>
+  <description>
+    <p>
+      OpenShotX is a native Rust screenshot and screen-recording tool for Linux
+      (X11 and Wayland), inspired by CleanShot X. It supports area, screen, and
+      window capture, screen recording to MP4 or GIF, OCR text extraction, and a
+      system-tray quick-capture menu.
+    </p>
+  </description>
+  <launchable type="desktop-id">openshotx.desktop</launchable>
+  <provides>
+    <binary>openshotx</binary>
+  </provides>
+  <url type="homepage">https://github.com/AnsCodeLab/OpenShotX</url>
+  <url type="bugtracker">https://github.com/AnsCodeLab/OpenShotX/issues</url>
+  <developer id="io.github.anscodelab">
+    <name>AnsCodeLab</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <categories>
+    <category>Graphics</category>
+    <category>Utility</category>
+  </categories>
+</component>

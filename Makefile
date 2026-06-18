@@ -29,6 +29,7 @@ dist: build
 	cp target/release/openshotx        dist/$(DISTNAME)/
 	cp data/openshotx.svg              dist/$(DISTNAME)/data/
 	cp data/openshotx.desktop          dist/$(DISTNAME)/data/
+	cp data/io.github.anscodelab.openshotx.metainfo.xml dist/$(DISTNAME)/data/
 	cp install.sh uninstall.sh README.md dist/$(DISTNAME)/
 	tar -C dist -czf dist/$(DISTNAME).tar.gz $(DISTNAME)
 	@echo "==> dist/$(DISTNAME).tar.gz"

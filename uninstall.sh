@@ -27,6 +27,7 @@ fi
 rm -fv "$PREFIX/bin/openshotx"
 rm -fv "$PREFIX/share/icons/hicolor/scalable/apps/openshotx.svg"
 rm -fv "$PREFIX/share/applications/openshotx.desktop"
+rm -fv "$PREFIX/share/metainfo/io.github.anscodelab.openshotx.metainfo.xml"
 # Tray autostart entry is always per-user.
 rm -fv "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/openshotx-tray.desktop"
 

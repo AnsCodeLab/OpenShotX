@@ -43,6 +43,7 @@ fi
 BIN_DIR="$PREFIX/bin"
 ICON_DIR="$PREFIX/share/icons/hicolor/scalable/apps"
 APP_DIR="$PREFIX/share/applications"
+METAINFO_DIR="$PREFIX/share/metainfo"
 
 echo "==> Installing OpenShotX to $PREFIX"
 
@@ -77,14 +78,19 @@ sed "s#Exec=openshotx#Exec=$BIN_DIR/openshotx#g" \
 install -Dm644 "$DESKTOP_TMP" "$APP_DIR/openshotx.desktop"
 rm -f "$DESKTOP_TMP"
 
+# AppStream metainfo (powers the "App Details" panel in GNOME Software).
+install -Dm644 "$SCRIPT_DIR/data/io.github.anscodelab.openshotx.metainfo.xml" \
+    "$METAINFO_DIR/io.github.anscodelab.openshotx.metainfo.xml"
+
 # Refresh caches (best-effort).
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APP_DIR" 2>/dev/null || true
 command -v gtk-update-icon-cache  >/dev/null 2>&1 && gtk-update-icon-cache -f -t "$PREFIX/share/icons/hicolor" 2>/dev/null || true
 
 echo "==> Installed:"
-echo "    binary:  $BIN_DIR/openshotx"
-echo "    icon:    $ICON_DIR/openshotx.svg"
-echo "    desktop: $APP_DIR/openshotx.desktop"
+echo "    binary:   $BIN_DIR/openshotx"
+echo "    icon:     $ICON_DIR/openshotx.svg"
+echo "    desktop:  $APP_DIR/openshotx.desktop"
+echo "    metainfo: $METAINFO_DIR/io.github.anscodelab.openshotx.metainfo.xml"
 
 # Warn if the bin dir isn't on PATH (common for ~/.local/bin on some setups).
 case ":$PATH:" in
