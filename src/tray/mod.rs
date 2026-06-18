@@ -229,12 +229,13 @@ pub fn spawn_tray_thread(tx: async_channel::Sender<TrayMsg>) {
                     }
                 }
             }
-            if let Some(handle) = handle {
+            if let Some(_handle) = handle {
                 eprintln!("tray: registered StatusNotifierItem with the watcher");
                 // Tell the GTK side the icon is live, so "minimize to tray" is safe.
                 let _ = tx.try_send(TrayMsg::Registered);
-                // Park until the SNI service shuts down (or the process exits).
-                handle.shutdown().await;
+                // Keep _handle alive until the runtime shuts down (process exit).
+                // Calling handle.shutdown() would actively stop the tray — don't do that.
+                std::future::pending::<()>().await;
             }
         });
     });
