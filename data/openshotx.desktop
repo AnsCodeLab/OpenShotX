@@ -1,0 +1,24 @@
+[Desktop Entry]
+Type=Application
+Name=OpenShotX
+GenericName=Screenshot Tool
+Comment=Capture screenshots and recordings (X11 and Wayland)
+Exec=openshotx config
+Icon=openshotx
+Terminal=false
+Categories=Graphics;
+Keywords=screenshot;capture;record;ocr;screen;snip;
+StartupNotify=true
+Actions=capture-area;capture-screen;record-screen;
+
+[Desktop Action capture-area]
+Name=Capture Area
+Exec=openshotx capture area
+
+[Desktop Action capture-screen]
+Name=Capture Screen
+Exec=openshotx capture screen
+
+[Desktop Action record-screen]
+Name=Record Screen
+Exec=openshotx record screen

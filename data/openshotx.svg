@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2b2f3a"/>
+      <stop offset="1" stop-color="#1a1d24"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="24" y1="24" x2="104" y2="104" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#34d399"/>
+      <stop offset="1" stop-color="#06b6d4"/>
+    </linearGradient>
+  </defs>
+
+  <!-- app tile -->
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="#22262f"/>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#bg)"/>
+
+  <!-- selection crop brackets -->
+  <g stroke="url(#accent)" stroke-width="7" stroke-linecap="round" fill="none">
+    <path d="M40 34 H34 V40"/>
+    <path d="M88 34 H94 V40"/>
+    <path d="M40 94 H34 V88"/>
+    <path d="M88 94 H94 V88"/>
+  </g>
+
+  <!-- shutter / capture dot -->
+  <circle cx="64" cy="64" r="18" fill="url(#accent)"/>
+  <circle cx="64" cy="64" r="8" fill="#22262f"/>
+</svg>
