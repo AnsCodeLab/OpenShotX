@@ -92,12 +92,12 @@ const PROFILES: &[EncoderProfile] = &[
         muxer: "mp4mux", 
         extension: "mp4"
     },
-    // Cisco OpenH264
+    // Cisco OpenH264 — needs h264parse to negotiate caps with mp4mux
     EncoderProfile {
-        name: "H.264 (OpenH264)", 
-        encoder: "openh264enc", 
-        props: "", 
-        muxer: "mp4mux", 
+        name: "H.264 (OpenH264)",
+        encoder: "openh264enc",
+        props: "! h264parse",
+        muxer: "mp4mux",
         extension: "mp4"
     },
     // Theora (Ogg) - Last resort
