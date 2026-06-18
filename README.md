@@ -47,6 +47,10 @@ All captures save to ~/Pictures (screenshots) or ~/Videos (recordings) by defaul
 - `--jpeg [quality]` - save as jpeg instead of png (quality 1-100)
 - `--prefix <text>` - custom filename prefix
 - `--ocr` - run ocr after capture and copy text to clipboard
+- `--open` / `--edit` - open the saved screenshot in an editor (or default app via xdg-open)
+
+filenames are `<prefix>_YYYY-MM-DD_HH-MM-SS.<ext>` using local time.
+set a custom editor with `capture.editor` in the config (e.g. `gimp`).
 
 **recording options:**
 - `--output <path>` - save to specific path (default: ~/Videos/output.mp4)

@@ -47,6 +47,10 @@ pub struct CaptureConfig {
     pub copy_to_clipboard: bool,
     #[serde(default)]
     pub include_cursor: bool,
+    /// Command used to open a screenshot for editing (via --edit).
+    /// Empty falls back to the system default app (xdg-open).
+    #[serde(default = "default_editor")]
+    pub editor: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +80,7 @@ fn default_videos() -> String { "~/Videos".to_string() }
 fn default_capture_format() -> CaptureFormat { CaptureFormat::Png }
 fn default_jpeg_quality() -> u8 { 85 }
 fn default_prefix() -> String { "screenshot".to_string() }
+fn default_editor() -> String { String::new() }
 fn default_copy_to_clipboard() -> bool { true }
 fn default_recording_format() -> RecordingFormat { RecordingFormat::Mp4 }
 fn default_recording_output() -> String { "~/Videos".to_string() }
@@ -102,6 +107,7 @@ impl Default for CaptureConfig {
             prefix: "screenshot".to_string(),
             copy_to_clipboard: true,
             include_cursor: false,
+            editor: String::new(),
         }
     }
 }

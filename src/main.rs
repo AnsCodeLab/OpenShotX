@@ -18,7 +18,7 @@ use openshotx::{
 };
 use openshotx::config::Config;
 use openshotx::gui;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[tokio::main]
 async fn main() {
@@ -99,6 +99,7 @@ async fn main() {
         println!("  --jpeg [quality]  Save as JPEG with quality 1-100 (default: PNG)");
         println!("  --prefix <text>   Prefix for filename (default: 'screenshot')");
         println!("  --ocr             Run OCR on captured image and copy to clipboard");
+        println!("  --open, --edit    Open the screenshot in an editor after saving");
         println!();
         println!("Recording options:");
         println!("  --output <path>   Save to specific path (default: ~/Videos/output.mp4)");
@@ -130,6 +131,7 @@ fn run_capture(args: &[String], config: &Config) {
         let mut jpeg_quality = config.capture.jpeg_quality;
         let mut prefix: Option<String> = None;
         let mut run_ocr = false;
+        let mut open_after = false;
         let mut ocr_lang: Option<String> = None;
         let mut ocr_min_conf: Option<i32> = None;
         let mut ocr_clipboard = true;
@@ -173,6 +175,10 @@ fn run_capture(args: &[String], config: &Config) {
                 }
                 "--ocr" => {
                     run_ocr = true;
+                    i += 1;
+                }
+                "--open" | "--edit" => {
+                    open_after = true;
                     i += 1;
                 }
                 "--lang" => {
@@ -312,6 +318,13 @@ fn run_capture(args: &[String], config: &Config) {
                 eprintln!("Warning: Failed to copy image to clipboard: {}", e);
             }
         }
+
+        // Open the screenshot in an editor / default viewer if requested
+        if open_after {
+            if let Err(e) = open_in_editor(&saved_path, &config.capture.editor) {
+                eprintln!("Warning: Failed to open screenshot: {}", e);
+            }
+        }
     
         // Run OCR if requested
         if run_ocr {
@@ -346,7 +359,29 @@ fn run_capture(args: &[String], config: &Config) {
             }
         }
     }
-    
+
+    /// Open a saved screenshot in an editor.
+    ///
+    /// Uses the configured editor command when set, otherwise falls back to the
+    /// system default handler via `xdg-open`. The child is spawned detached so
+    /// the CLI returns immediately.
+    fn open_in_editor(path: &Path, editor: &str) -> std::io::Result<()> {
+        let (program, args): (&str, Vec<&str>) = if editor.trim().is_empty() {
+            ("xdg-open", vec![])
+        } else {
+            let mut parts = editor.split_whitespace();
+            let prog = parts.next().unwrap_or("xdg-open");
+            (prog, parts.collect())
+        };
+
+        println!("Opening in {}...", program);
+        std::process::Command::new(program)
+            .args(&args)
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+    }
+
     fn run_ocr(args: &[String]) {
         let image_path = &args[2];
     

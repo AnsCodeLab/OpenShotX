@@ -7,7 +7,6 @@ use crate::backend::{CaptureData, CursorData, PixelFormat};
 use image::{ImageBuffer, Rgba, RgbImage, RgbaImage};
 use image::buffer::ConvertBuffer;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 use thiserror::Error;
 
 /// Errors that can occur during image saving
@@ -401,21 +400,15 @@ fn composite_cursor(image: &mut RgbaImage, cursor: &CursorData) {
 
 /// Generate a timestamped filename
 fn generate_filename(config: &SaveConfig) -> String {
-    let timestamp = if config.timestamp_format.is_some() {
-        // Use custom format (simplified - for full strftime support, would need chrono)
-        format!("custom")
-    } else {
-        // Default: YYYY-MM-DD_HH-MM-SS
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default();
-        let datetime = chrono::DateTime::from_timestamp(now.as_secs() as i64, now.subsec_nanos())
-            .unwrap_or_else(|| chrono::Utc::now());
-        datetime.format("%Y-%m-%d_%H-%M-%S").to_string()
-    };
+    // Local wall-clock time so the stamp matches what the user sees.
+    let fmt = config
+        .timestamp_format
+        .as_deref()
+        .unwrap_or("%Y-%m-%d_%H-%M-%S");
+    let timestamp = chrono::Local::now().format(fmt).to_string();
 
     let prefix = config.filename_prefix.as_deref().unwrap_or("screenshot");
-    format!("{}{}.{}", prefix, timestamp, config.format.extension())
+    format!("{}_{}.{}", prefix, timestamp, config.format.extension())
 }
 
 /// Save a capture to disk with the given configuration
