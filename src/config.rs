@@ -61,6 +61,14 @@ pub struct RecordingConfig {
     pub format: RecordingFormat,
     #[serde(default = "default_recording_output")]
     pub output: String,
+    #[serde(default = "default_recording_prefix")]
+    pub prefix: String,
+    #[serde(default)]
+    pub highlight_cursor: bool,
+    #[serde(default = "default_highlight_color")]
+    pub highlight_color: String,
+    #[serde(default = "default_highlight_radius")]
+    pub highlight_radius: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +108,9 @@ fn default_editor() -> String { String::new() }
 fn default_copy_to_clipboard() -> bool { true }
 fn default_recording_format() -> RecordingFormat { RecordingFormat::Mp4 }
 fn default_recording_output() -> String { "~/Videos".to_string() }
+fn default_recording_prefix() -> String { "recording".to_string() }
+fn default_highlight_color() -> String { "#FFFF00".to_string() }
+fn default_highlight_radius() -> u32 { 30 }
 fn default_capture_area() -> String { "<Super><Shift>4".to_string() }
 fn default_capture_screen() -> String { "Print".to_string() }
 fn default_capture_window() -> String { "<Alt>Print".to_string() }
@@ -133,6 +144,10 @@ impl Default for RecordingConfig {
         Self {
             format: RecordingFormat::Mp4,
             output: "~/Videos".to_string(),
+            prefix: "recording".to_string(),
+            highlight_cursor: false,
+            highlight_color: "#FFFF00".to_string(),
+            highlight_radius: 30,
         }
     }
 }

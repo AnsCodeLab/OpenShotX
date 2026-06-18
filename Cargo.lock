@@ -1968,6 +1968,7 @@ dependencies = [
  "ashpd",
  "async-channel",
  "async-trait",
+ "cairo-rs",
  "chrono",
  "dirs",
  "futures-util",

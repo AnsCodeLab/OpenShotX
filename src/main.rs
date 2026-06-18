@@ -109,7 +109,7 @@ async fn main() {
         println!("  --notify          Show a desktop notification when done");
         println!();
         println!("Recording options:");
-        println!("  --output <path>   Save to specific path (default: ~/Videos/output.mp4)");
+        println!("  --output <path>   Save to specific path (default uses timestamped name)");
         println!("  --gif             Record as GIF and copy to clipboard");
         println!();
         println!("Scrolling capture options:");
@@ -542,10 +542,23 @@ async fn run_record(args: &[String], config: &Config) -> Result<(), Box<dyn std:
                         rec_config.output_path.set_extension("gif");
                     }
                 } else {
-                    let videos_dir = PathBuf::from(shellexpand::tilde(&config.paths.videos).as_ref());
-                    let filename = if is_gif { "output.gif" } else { "output.mp4" };
-                    rec_config.output_path = videos_dir.join(filename);
+                    let ext = if is_gif {
+                        "gif"
+                    } else {
+                        match config.recording.format {
+                            openshotx::config::RecordingFormat::Mp4 => "mp4",
+                            openshotx::config::RecordingFormat::Webm => "webm",
+                        }
+                    };
+                    rec_config.output_path = openshotx::recording::generate_recording_filename(
+                        &config.paths.videos,
+                        &config.recording.prefix,
+                        ext,
+                    );
                 }
+                rec_config.highlight_cursor = config.recording.highlight_cursor;
+                rec_config.highlight_color = config.recording.highlight_color.clone();
+                rec_config.highlight_radius = config.recording.highlight_radius;
             
                 // Handle area selection if needed
                 if record_type == "area" {

@@ -1,10 +1,17 @@
 use std::path::PathBuf;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use zbus::zvariant::OwnedValue;
 use gst::prelude::*;
 use gstreamer as gst;
 use gstreamer_app as gst_app;
+
+pub fn generate_recording_filename(output_dir: &str, prefix: &str, extension: &str) -> PathBuf {
+    let dir = std::path::PathBuf::from(shellexpand::tilde(output_dir).as_ref());
+    let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+    dir.join(format!("{prefix}_{timestamp}.{extension}"))
+}
 
 #[derive(Debug, Error)]
 pub enum RecordError {
@@ -42,6 +49,9 @@ pub struct RecordingConfig {
     pub height: Option<u32>,
     pub x: Option<i32>,
     pub y: Option<i32>,
+    pub highlight_cursor: bool,
+    pub highlight_color: String,
+    pub highlight_radius: u32,
 }
 
 impl Default for RecordingConfig {
@@ -54,6 +64,9 @@ impl Default for RecordingConfig {
             height: None,
             x: None,
             y: None,
+            highlight_cursor: false,
+            highlight_color: "#FFFF00".to_string(),
+            highlight_radius: 30,
         }
     }
 }
@@ -137,6 +150,11 @@ pub async fn start_recording(config: RecordingConfig) -> RecordResult<PathBuf> {
         .map_err(|e| RecordError::GStreamerError(format!("Failed to parse pipeline: {}", e)))
         ?.downcast::<gst::Pipeline>()
         .map_err(|_| RecordError::GStreamerError("Cast to Pipeline failed".into()))?;
+
+    // 4b. Setup cursor overlay if requested
+    if config.highlight_cursor {
+        setup_cursor_overlay(&pipeline, &config);
+    }
 
     // 5. Start playing
     if let Err(err) = pipeline.set_state(gst::State::Playing) {
@@ -336,19 +354,27 @@ fn select_encoder(requested_path: &PathBuf) -> RecordResult<(&'static EncoderPro
 
 async fn build_pipeline(config: &RecordingConfig, profile: &EncoderProfile, output_path: &PathBuf) -> RecordResult<String> {
     let output_str = output_path.to_string_lossy();
-    
+
     // Get video source
     let video_source = if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        get_wayland_source().await? 
+        get_wayland_source().await?
     } else {
         get_x11_source(config)?
     };
 
-    Ok(format!(
-        "{} ! videoconvert ! videorate ! queue ! {} {} ! {} ! filesink location=\"{}\"",
-        video_source,
-        profile.encoder, profile.props, profile.muxer, output_str
-    ))
+    if config.highlight_cursor {
+        Ok(format!(
+            "{} ! videoconvert ! cairooverlay name=co ! videorate ! queue ! {} {} ! {} ! filesink location=\"{}\"",
+            video_source,
+            profile.encoder, profile.props, profile.muxer, output_str
+        ))
+    } else {
+        Ok(format!(
+            "{} ! videoconvert ! videorate ! queue ! {} {} ! {} ! filesink location=\"{}\"",
+            video_source,
+            profile.encoder, profile.props, profile.muxer, output_str
+        ))
+    }
 }
 
 fn screencast_token_path() -> std::path::PathBuf {
@@ -474,6 +500,67 @@ async fn wait_for_response(
     }
     
     Ok(results)
+}
+
+fn setup_cursor_overlay(pipeline: &gst::Pipeline, config: &RecordingConfig) {
+    let overlay = match pipeline.by_name("co") {
+        Some(e) => e,
+        None => return,
+    };
+
+    let cursor_pos = Arc::new(Mutex::new((0.0f64, 0.0f64)));
+    let tracker = cursor_pos.clone();
+
+    std::thread::spawn(move || {
+        use x11rb::connection::Connection;
+        use x11rb::protocol::xproto::ConnectionExt as _;
+        if let Ok((conn, screen_num)) = x11rb::connect(None) {
+            let root = conn.setup().roots[screen_num].root;
+            loop {
+                if let Ok(cookie) = conn.query_pointer(root) {
+                    if let Ok(reply) = cookie.reply() {
+                        if let Ok(mut p) = tracker.lock() {
+                            *p = (reply.root_x as f64, reply.root_y as f64);
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(16));
+            }
+        }
+    });
+
+    let color_hex = config.highlight_color.trim_start_matches('#').to_string();
+    let radius = config.highlight_radius as f64;
+
+    overlay.connect("draw", false, move |values| {
+        // Extract the cairo_t* from the GLib value using raw pointer access.
+        // cairo-rs 0.20 uses glib 0.20 while gstreamer 0.24 uses glib 0.21,
+        // so we bypass the type system by reading the boxed pointer directly.
+        let cr: cairo::Context = unsafe {
+            use gst::glib::translate::ToGlibPtr;
+            let gvalue: &gst::glib::Value = &values[1];
+            let raw_gvalue: *const gst::glib::gobject_ffi::GValue = gvalue.to_glib_none().0;
+            let ptr = gst::glib::gobject_ffi::g_value_get_boxed(raw_gvalue);
+            if ptr.is_null() {
+                return None;
+            }
+            cairo::Context::from_raw_none(ptr as *mut cairo::ffi::cairo_t)
+        };
+
+        let (x, y) = cursor_pos.lock().map(|p| *p).unwrap_or((0.0, 0.0));
+        if x > 0.0 || y > 0.0 {
+            let r = u8::from_str_radix(&color_hex[0..2], 16).unwrap_or(255) as f64 / 255.0;
+            let g = u8::from_str_radix(&color_hex[2..4], 16).unwrap_or(255) as f64 / 255.0;
+            let b = u8::from_str_radix(&color_hex[4..6], 16).unwrap_or(0) as f64 / 255.0;
+            cr.arc(x, y, radius, 0.0, 2.0 * std::f64::consts::PI);
+            cr.set_source_rgba(r, g, b, 0.4);
+            let _ = cr.fill_preserve();
+            cr.set_source_rgba(r, g, b, 1.0);
+            cr.set_line_width(3.0);
+            let _ = cr.stroke();
+        }
+        None
+    });
 }
 
 fn get_x11_source(config: &RecordingConfig) -> RecordResult<String> {

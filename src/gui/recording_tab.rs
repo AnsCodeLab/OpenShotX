@@ -100,6 +100,97 @@ fn build_page(config: &Rc<RefCell<Config>>) -> gtk::ScrolledWindow {
     path_box.append(&hbox);
     vbox.append(&path_box);
 
+    // Prefix row
+    let prefix_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let prefix_lbl = gtk::Label::builder()
+        .label("Filename prefix")
+        .hexpand(true)
+        .halign(gtk::Align::Start)
+        .build();
+    let prefix_entry = gtk::Entry::builder()
+        .text(config.borrow().recording.prefix.as_str())
+        .build();
+    {
+        let cfg = config.clone();
+        prefix_entry.connect_changed(move |e| {
+            cfg.borrow_mut().recording.prefix = e.text().to_string();
+        });
+    }
+    prefix_box.append(&prefix_lbl);
+    prefix_box.append(&prefix_entry);
+    vbox.append(&prefix_box);
+
+    // Highlight cursor row
+    let hl_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let hl_lbl = gtk::Label::builder()
+        .label("Highlight cursor")
+        .hexpand(true)
+        .halign(gtk::Align::Start)
+        .build();
+    let hl_switch = gtk::Switch::new();
+    hl_switch.set_active(config.borrow().recording.highlight_cursor);
+    {
+        let cfg = config.clone();
+        hl_switch.connect_active_notify(move |sw| {
+            cfg.borrow_mut().recording.highlight_cursor = sw.is_active();
+        });
+    }
+    hl_box.append(&hl_lbl);
+    hl_box.append(&hl_switch);
+    vbox.append(&hl_box);
+
+    // Highlight color row
+    let color_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let color_lbl = gtk::Label::builder()
+        .label("Highlight color (hex)")
+        .hexpand(true)
+        .halign(gtk::Align::Start)
+        .build();
+    let color_entry = gtk::Entry::builder()
+        .text(config.borrow().recording.highlight_color.as_str())
+        .sensitive(config.borrow().recording.highlight_cursor)
+        .build();
+    {
+        let cfg = config.clone();
+        color_entry.connect_changed(move |e| {
+            cfg.borrow_mut().recording.highlight_color = e.text().to_string();
+        });
+    }
+    color_box.append(&color_lbl);
+    color_box.append(&color_entry);
+    vbox.append(&color_box);
+
+    // Highlight radius row
+    let radius_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let radius_lbl = gtk::Label::builder()
+        .label("Highlight radius (px)")
+        .hexpand(true)
+        .halign(gtk::Align::Start)
+        .build();
+    let radius_spin = gtk::SpinButton::with_range(10.0, 100.0, 5.0);
+    radius_spin.set_value(config.borrow().recording.highlight_radius as f64);
+    radius_spin.set_sensitive(config.borrow().recording.highlight_cursor);
+    {
+        let cfg = config.clone();
+        radius_spin.connect_value_changed(move |sb| {
+            cfg.borrow_mut().recording.highlight_radius = sb.value() as u32;
+        });
+    }
+    radius_box.append(&radius_lbl);
+    radius_box.append(&radius_spin);
+    vbox.append(&radius_box);
+
+    // Wire highlight switch to color/radius sensitivity
+    {
+        let color_entry_ref = color_entry.clone();
+        let radius_spin_ref = radius_spin.clone();
+        hl_switch.connect_active_notify(move |sw| {
+            let active = sw.is_active();
+            color_entry_ref.set_sensitive(active);
+            radius_spin_ref.set_sensitive(active);
+        });
+    }
+
     gtk::ScrolledWindow::builder()
         .child(&vbox)
         .hscrollbar_policy(gtk::PolicyType::Never)
