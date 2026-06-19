@@ -69,14 +69,7 @@ impl OpenShotXTray {
                 return; // already recording
             }
         }
-        let exe = match std::env::current_exe() {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("tray: cannot resolve current executable: {}", e);
-                return;
-            }
-        };
-        match Command::new(&exe).args(["record", "screen", "--notify"]).spawn() {
+        match Command::new("openshotx").args(["record", "screen", "--notify"]).spawn() {
             Ok(child) => self.recording = Some(child),
             Err(e) => eprintln!("tray: failed to start recording: {}", e),
         }
@@ -101,15 +94,8 @@ impl OpenShotXTray {
 
 /// Spawn the OpenShotX binary with `args`, detached. Logs failures; never panics.
 fn spawn_action(args: &[&str]) {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("tray: cannot resolve current executable: {}", e);
-            return;
-        }
-    };
-    if let Err(e) = Command::new(&exe).args(args).spawn() {
-        eprintln!("tray: failed to launch {:?} {:?}: {}", exe, args, e);
+    if let Err(e) = Command::new("openshotx").args(args).spawn() {
+        eprintln!("tray: failed to launch openshotx {:?}: {}", args, e);
     }
 }
 
