@@ -447,6 +447,64 @@ pub fn select_area() -> SelectionResult {
     selector.run()
 }
 
+/// Let the user click on an X11 window to select it for recording.
+///
+/// Grabs the pointer, waits for a button-press, then returns the geometry of
+/// whichever X11 window was directly under the cursor (falling back to the
+/// root window). Right-click or middle-click cancels and returns `Ok(None)`.
+pub fn select_window() -> Result<Option<SelectionArea>, Box<dyn std::error::Error>> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::*;
+
+    let (conn, screen_num) = x11rb::connect(None)?;
+    let root = conn.setup().roots[screen_num].root;
+
+    let reply = conn.grab_pointer(
+        false,
+        root,
+        EventMask::BUTTON_PRESS,
+        GrabMode::SYNC,
+        GrabMode::ASYNC,
+        root,
+        0u32,  // no cursor override
+        0u32,  // CurrentTime
+    )?.reply()?;
+
+    if reply.status != GrabStatus::SUCCESS {
+        return Err("Failed to grab pointer for window selection".into());
+    }
+
+    println!("Click on a window to select it for recording. Right-click to cancel.");
+
+    loop {
+        conn.allow_events(Allow::SYNC_POINTER, 0u32)?.ignore_error();
+        conn.flush()?;
+        let event = conn.wait_for_event()?;
+
+        if let x11rb::protocol::Event::ButtonPress(ev) = event {
+            conn.ungrab_pointer(0u32)?.ignore_error();
+            conn.flush()?;
+
+            if ev.detail != 1 {
+                return Ok(None); // right-click or middle-click = cancel
+            }
+
+            // Use the child window directly under the click, fall back to root
+            let target = if ev.child != 0 { ev.child } else { root };
+
+            let geom = conn.get_geometry(target)?.reply()?;
+            let trans = conn.translate_coordinates(target, root, 0, 0)?.reply()?;
+
+            return Ok(Some(SelectionArea {
+                x: trans.dst_x as i32,
+                y: trans.dst_y as i32,
+                width: geom.width as i32,
+                height: geom.height as i32,
+            }));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

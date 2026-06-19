@@ -14,7 +14,7 @@ pub mod utils;
 // Re-export commonly used types
 pub use backend::{DisplayBackend, DisplayError, DisplayResult, CaptureData, PixelFormat};
 pub use capture::{save_capture, quick_save, SaveConfig, ImageFormat, SaveError, SaveResult, copy_image_to_clipboard};
-pub use overlay::{select_area, AreaSelector, SelectionArea, SelectionError, SelectionResult};
+pub use overlay::{select_area, select_window, AreaSelector, SelectionArea, SelectionError, SelectionResult};
 pub use ocr::{OcrConfig, OcrOutput, OcrError, OcrResult, extract_text, extract_text_from_path, copy_to_clipboard};
 pub use recording::{RecordingConfig, start_recording, RecordError, RecordResult};
 pub use scrolling::{ScrollCaptureConfig, ScrollCaptureResult, ScrollError, ScrollResult, capture_scrolling_pw, save_scrolling_capture};

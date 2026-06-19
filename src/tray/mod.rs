@@ -58,9 +58,11 @@ struct OpenShotXTray {
 }
 
 impl OpenShotXTray {
-    /// Start a screen recording as a child process, tracking it so it can be
-    /// stopped from the menu. On Wayland this triggers the portal share dialog.
-    fn start_recording(&mut self) {
+    /// Start a recording of the given type as a child process, tracking it so
+    /// it can be stopped from the menu. On Wayland this triggers the portal
+    /// share dialog. `record_type` should be `"screen"`, `"area"`, or
+    /// `"window"`.
+    fn start_recording(&mut self, record_type: &str) {
         // Reap any previous child that already exited on its own.
         if let Some(child) = self.recording.as_mut() {
             if matches!(child.try_wait(), Ok(Some(_))) {
@@ -69,7 +71,8 @@ impl OpenShotXTray {
                 return; // already recording
             }
         }
-        match Command::new("openshotx").args(["record", "screen", "--notify"]).spawn() {
+        let args = vec!["record", record_type, "--notify"];
+        match Command::new("openshotx").args(&args).spawn() {
             Ok(child) => self.recording = Some(child),
             Err(e) => eprintln!("tray: failed to start recording: {}", e),
         }
@@ -139,34 +142,42 @@ impl Tray for OpenShotXTray {
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        // While recording, the item toggles to a stop action. Mutating the tray
-        // in either callback makes ksni re-render the menu automatically.
-        let record_item: MenuItem<Self> = if self.recording.is_some() {
-            StandardItem {
-                label: "⏹ Stop Recording".into(),
-                activate: Box::new(|this: &mut OpenShotXTray| this.stop_recording()),
-                ..Default::default()
-            }
-            .into()
+        // While recording: show only the stop button.
+        // Otherwise: show three recording options.
+        let recording_items: Vec<MenuItem<Self>> = if self.recording.is_some() {
+            vec![
+                StandardItem {
+                    label: "⏹ Stop Recording".into(),
+                    activate: Box::new(|this: &mut OpenShotXTray| this.stop_recording()),
+                    ..Default::default()
+                }
+                .into(),
+            ]
         } else {
-            StandardItem {
-                label: "Record Screen".into(),
-                activate: Box::new(|this: &mut OpenShotXTray| this.start_recording()),
-                ..Default::default()
-            }
-            .into()
+            vec![
+                StandardItem {
+                    label: "Record Screen".into(),
+                    activate: Box::new(|this: &mut OpenShotXTray| this.start_recording("screen")),
+                    ..Default::default()
+                }
+                .into(),
+                action_item("Record Region", &["record", "area", "--notify"]),
+                action_item("Record Window", &["record", "window", "--notify"]),
+            ]
         };
 
-        vec![
+        let mut items: Vec<MenuItem<Self>> = vec![
             action_item("Capture Area", &["capture", "area", "--notify"]),
             action_item("Capture Screen", &["capture", "screen", "--notify"]),
             action_item("Capture Window", &["capture", "window", "--notify"]),
-            record_item,
             action_item("Capture & OCR Text", &["capture", "area", "--ocr", "--notify"]),
             MenuItem::Separator,
-            msg_item("Settings…", TrayMsg::ShowSettings),
-            msg_item("Quit", TrayMsg::Quit),
-        ]
+        ];
+        items.extend(recording_items);
+        items.push(MenuItem::Separator);
+        items.push(msg_item("Settings…", TrayMsg::ShowSettings));
+        items.push(msg_item("Quit", TrayMsg::Quit));
+        items
     }
 }
 

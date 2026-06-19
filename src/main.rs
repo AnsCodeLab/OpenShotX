@@ -12,6 +12,7 @@ use openshotx::{
     backend::{X11Backend, WaylandBackend, CaptureData, DisplayBackend},
     capture::{save_capture, SaveConfig, ImageFormat, copy_image_to_clipboard},
     select_area,
+    select_window,
     ocr::{extract_text_from_path, OcrConfig},
     recording::{RecordingConfig, start_recording, copy_to_clipboard as copy_recording_to_clipboard},
     scrolling::{ScrollCaptureConfig, capture_scrolling_pw, save_scrolling_capture},
@@ -99,6 +100,11 @@ async fn main() {
         println!("  area              Capture a selected area (Wayland: interactive)");
         println!("  window            Capture a specific window (Wayland: interactive)");
         println!();
+        println!("Recording types:");
+        println!("  screen            Record the entire screen");
+        println!("  area              Record a selected region (X11: drag to select)");
+        println!("  window            Record a specific window (X11: click to select)");
+        println!();
         println!("Capture options:");
         println!("  --output <path>   Save to specific path (default: ~/Pictures)");
         println!("  --no-cursor       Don't include cursor in screenshot");
@@ -124,6 +130,7 @@ async fn main() {
         println!("  cargo run -- capture screen");
         println!("  cargo run -- record screen");
         println!("  cargo run -- record area --gif");
+        println!("  cargo run -- record window");
         println!("  cargo run -- scroll");
     }
     
@@ -560,12 +567,12 @@ async fn run_record(args: &[String], config: &Config) -> Result<(), Box<dyn std:
                 rec_config.highlight_color = config.recording.highlight_color.clone();
                 rec_config.highlight_radius = config.recording.highlight_radius;
             
-                // Handle area selection if needed
+                // Handle area/window selection if needed
                 if record_type == "area" {
                     // If on X11, launch overlay
                     if std::env::var("WAYLAND_DISPLAY").is_err() && X11Backend::is_supported() {
                          println!("Select an area to record by dragging the mouse. Press ESC to cancel.");
-                         
+
                          let selection = select_area().map_err(|e| format!("Selection failed: {}", e))?;
                          if let Some(area) = selection {
                              rec_config.x = Some(area.x);
@@ -577,11 +584,25 @@ async fn run_record(args: &[String], config: &Config) -> Result<(), Box<dyn std:
                              return Ok(());
                          }
                     } else {
-                        // Wayland area = portal selection (handled in start_recording)
-                        println!("Wayland detected: 'area' recording triggers system screen/window selection.");
+                        println!("Wayland: portal will let you select a screen or window to record.");
+                    }
+                } else if record_type == "window" {
+                    if std::env::var("WAYLAND_DISPLAY").is_err() && X11Backend::is_supported() {
+                        let selection = select_window().map_err(|e| format!("Window selection failed: {}", e))?;
+                        if let Some(area) = selection {
+                            rec_config.x = Some(area.x);
+                            rec_config.y = Some(area.y);
+                            rec_config.width = Some(area.width as u32);
+                            rec_config.height = Some(area.height as u32);
+                        } else {
+                            println!("Selection cancelled.");
+                            return Ok(());
+                        }
+                    } else {
+                        println!("Wayland: portal will let you select a window to record.");
                     }
                 } else if record_type != "screen" {
-                     eprintln!("Error: recording type '{}' not supported (use 'screen' or 'area')", record_type);
+                     eprintln!("Error: recording type '{}' not supported (use 'screen', 'area', or 'window')", record_type);
                      std::process::exit(1);
                 }
 
