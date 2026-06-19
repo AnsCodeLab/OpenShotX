@@ -364,13 +364,13 @@ async fn build_pipeline(config: &RecordingConfig, profile: &EncoderProfile, outp
 
     if config.highlight_cursor {
         Ok(format!(
-            "{} ! videoconvert ! cairooverlay name=co ! videorate ! queue ! {} {} ! {} ! filesink location=\"{}\"",
+            "{} ! videoconvert ! cairooverlay name=co ! videoconvert ! videorate ! queue ! videoconvert ! {} {} ! {} ! filesink location=\"{}\"",
             video_source,
             profile.encoder, profile.props, profile.muxer, output_str
         ))
     } else {
         Ok(format!(
-            "{} ! videoconvert ! videorate ! queue ! {} {} ! {} ! filesink location=\"{}\"",
+            "{} ! videoconvert ! videorate ! queue ! videoconvert ! {} {} ! {} ! filesink location=\"{}\"",
             video_source,
             profile.encoder, profile.props, profile.muxer, output_str
         ))
