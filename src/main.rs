@@ -9,12 +9,13 @@
 //!   cargo run -- ocr <image>
 
 use openshotx::{
-    backend::{X11Backend, WaylandBackend, CaptureData, DisplayBackend, DisplayResult},
+    backend::{X11Backend, WaylandBackend, CaptureData, DisplayBackend},
     capture::{save_capture, SaveConfig, ImageFormat, copy_image_to_clipboard},
     select_area,
     select_window,
     AreaAction,
     AreaPick,
+    AreaOutcome,
     SelectionArea,
     SelectionError,
     ocr::{extract_text_from_path, OcrConfig},
@@ -249,10 +250,8 @@ async fn run_capture(args: &[String], config: &Config) {
             if X11Backend::is_supported() {
                 println!("Select an area by dragging the mouse, then choose Capture or Record from the panel.");
                 match show_area_overlay(AreaAction::Capture) {
-                    Some(AreaPick { action: AreaAction::Capture, area, .. }) => {
-                        capture_area_pixels(area).expect("Area capture failed")
-                    }
-                    Some(AreaPick { action: AreaAction::Record, area, screen_width, screen_height }) => {
+                    Some(AreaOutcome::Captured(data)) => data,
+                    Some(AreaOutcome::Record(AreaPick { area, screen_width, screen_height, .. })) => {
                         // Switched to recording from the control panel.
                         if let Err(e) = record_area_default(config, area, screen_width, screen_height, notify).await {
                             eprintln!("Recording failed: {}", e);
@@ -457,7 +456,7 @@ async fn run_capture(args: &[String], config: &Config) {
     /// message instead of a panic. Returns `None` for both a real
     /// cancellation (ESC) and the already-in-progress case -- both mean
     /// "there is nothing to do", the printed message tells them apart.
-    fn show_area_overlay(default_action: AreaAction) -> Option<AreaPick> {
+    fn show_area_overlay(default_action: AreaAction) -> Option<AreaOutcome> {
         match select_area(default_action) {
             Ok(pick) => pick,
             Err(SelectionError::AlreadyInProgress) => {
@@ -471,28 +470,14 @@ async fn run_capture(args: &[String], config: &Config) {
         }
     }
 
-    /// Capture the pixels of `area`, choosing the right backend for this
-    /// session: on Wayland, `X11Backend::capture_area` can't see real
-    /// desktop content (XWayland's root window doesn't reflect Wayland
-    /// client compositing), so grab the full monitor through the portal
-    /// and crop client-side; on native X11, capture the region directly.
-    fn capture_area_pixels(area: SelectionArea) -> DisplayResult<CaptureData> {
-        if WaylandBackend::is_supported() {
-            WaylandBackend::new()?
-                .capture_screen()?
-                .crop(area.x, area.y, area.width, area.height)
-        } else {
-            X11Backend::new()?.capture_area(area.x, area.y, area.width, area.height)
-        }
-    }
-
-    /// Capture and save a screenshot of `area` using config defaults (no
+    /// Save an already-captured area screenshot using config defaults (no
     /// CLI flags), used when the user picks Capture from the control panel
-    /// while running `record area`.
-    fn capture_area_default(config: &Config, area: SelectionArea, notify: bool) -> Result<(), Box<dyn std::error::Error>> {
-        let capture = capture_area_pixels(area)
-            .map_err(|e| format!("Area capture failed: {}", e))?;
-
+    /// while running `record area`. Pixels are captured inline by the
+    /// overlay itself (see `overlay::AreaOutcome::Captured`) while its
+    /// window is still open and focused -- capturing after the fact, once
+    /// this CLI has no window at all, gets its portal Screenshot request
+    /// silently killed by GNOME's "only the focused app..." check.
+    fn save_area_screenshot(config: &Config, capture: CaptureData, notify: bool) -> Result<(), Box<dyn std::error::Error>> {
         let format = if matches!(config.capture.format, openshotx::config::CaptureFormat::Jpeg) {
             ImageFormat::Jpeg { quality: config.capture.jpeg_quality }
         } else {
@@ -706,7 +691,7 @@ async fn run_record(args: &[String], config: &Config) -> Result<(), Box<dyn std:
                          println!("Select an area to record, then choose Capture or Record from the panel.");
 
                          match show_area_overlay(AreaAction::Record) {
-                             Some(AreaPick { action: AreaAction::Record, area, screen_width, screen_height }) => {
+                             Some(AreaOutcome::Record(AreaPick { area, screen_width, screen_height, .. })) => {
                                  rec_config.x = Some(area.x);
                                  rec_config.y = Some(area.y);
                                  rec_config.width = Some(area.width as u32);
@@ -714,9 +699,9 @@ async fn run_record(args: &[String], config: &Config) -> Result<(), Box<dyn std:
                                  rec_config.screen_width = Some(screen_width);
                                  rec_config.screen_height = Some(screen_height);
                              }
-                             Some(AreaPick { action: AreaAction::Capture, area, .. }) => {
+                             Some(AreaOutcome::Captured(capture)) => {
                                  // Switched to a screenshot from the control panel.
-                                 capture_area_default(config, area, notify)?;
+                                 save_area_screenshot(config, capture, notify)?;
                                  return Ok(());
                              }
                              None => {

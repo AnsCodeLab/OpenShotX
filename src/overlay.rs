@@ -13,6 +13,8 @@ use gtk4::gdk::Key;
 use parking_lot::Mutex;
 use std::sync::Arc;
 
+use crate::backend::{CaptureData, DisplayBackend, DisplayResult, WaylandBackend, X11Backend};
+
 /// Selected area coordinates
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SelectionArea {
@@ -52,6 +54,9 @@ pub enum SelectionError {
 
     #[error("An area selection is already in progress")]
     AlreadyInProgress,
+
+    #[error("Failed to capture the selected area: {0}")]
+    CaptureFailed(String),
 }
 
 /// Which action to perform with a selected area, chosen from the on-screen
@@ -75,9 +80,23 @@ pub struct AreaPick {
     pub screen_height: u32,
 }
 
-/// Result of an area selection made through the control panel: the chosen
-/// action, rectangle, and screen size, or `None` if the user cancelled.
-pub type AreaSelectionResult = Result<Option<AreaPick>, SelectionError>;
+/// Result of an area selection made through the control panel.
+///
+/// `Captured` carries pixels already grabbed synchronously, on the GTK
+/// main thread, while the overlay window was still open and focused --
+/// see `capture_area_pixels`'s doc comment for why this can't be
+/// deferred to the caller. `Record` only carries geometry: the actual
+/// recording pipeline starts separately afterward and negotiates its own
+/// (already reliable, token-persisted) ScreenCast session.
+#[derive(Debug)]
+pub enum AreaOutcome {
+    Captured(CaptureData),
+    Record(AreaPick),
+}
+
+/// Result of an area selection: the outcome, or `None` if the user
+/// cancelled.
+pub type AreaSelectionResult = Result<Option<AreaOutcome>, SelectionError>;
 
 /// State for the area selector overlay
 struct SelectorState {
@@ -230,10 +249,10 @@ impl AreaSelector {
 
     /// Run the area selection dialog
     ///
-    /// Returns `Ok(Some(AreaPick))` if the user drew a region and picked
-    /// Capture or Record from the control panel.
+    /// Returns `Ok(Some(AreaOutcome))` if the user drew a region and
+    /// picked Capture or Record from the control panel.
     /// Returns `Ok(None)` if user cancelled (ESC).
-    /// Returns `Err` if initialization failed
+    /// Returns `Err` if initialization, or the capture itself, failed.
     pub fn run(&self) -> AreaSelectionResult {
         // Only one overlay may be open at a time: a double-pressed hotkey
         // or tray+hotkey race must not stack multiple fullscreen windows,
@@ -522,6 +541,25 @@ fn handle_drag_end(
     }
 }
 
+/// Capture the pixels of `area`, choosing the right backend for this
+/// session: on Wayland, `X11Backend::capture_area` can't see real desktop
+/// content (XWayland's root window doesn't reflect Wayland client
+/// compositing), so grab the full monitor through the portal and crop
+/// client-side; on native X11, capture the region directly.
+///
+/// Called synchronously from the overlay's `drag_end` handler, before the
+/// window closes -- see the call site's comment for why deferring this
+/// to the caller (as it used to) silently broke every area screenshot.
+fn capture_area_pixels(area: SelectionArea) -> DisplayResult<CaptureData> {
+    if WaylandBackend::is_supported() {
+        WaylandBackend::new()?
+            .capture_screen()?
+            .crop(area.x, area.y, area.width, area.height)
+    } else {
+        X11Backend::new()?.capture_area(area.x, area.y, area.width, area.height)
+    }
+}
+
 /// Setup the overlay window (standalone function to avoid lifetime issues)
 fn setup_window(
     app: &Application,
@@ -683,14 +721,30 @@ fn setup_window(
                         window.close();
                     }
                 }
-                EndOutcome::PanelAction(action, area, (sw, sh)) => {
+                EndOutcome::PanelAction(AreaAction::Record, area, (sw, sh)) => {
                     let pick = AreaPick {
-                        action,
+                        action: AreaAction::Record,
                         area,
                         screen_width: sw as u32,
                         screen_height: sh as u32,
                     };
-                    let _ = result_tx_drag.send(Ok(Some(pick)));
+                    let _ = result_tx_drag.send(Ok(Some(AreaOutcome::Record(pick))));
+                    if let Some(window) = window_weak.upgrade() {
+                        window.close();
+                    }
+                }
+                EndOutcome::PanelAction(AreaAction::Capture, area, _) => {
+                    // Capture pixels now, synchronously, while this window
+                    // is still open and focused. GNOME's Screenshot portal
+                    // refuses to show its consent dialog once this process
+                    // has no window at all ("Only the focused app is
+                    // allowed to show a system access dialog" -- confirmed
+                    // via journalctl), which is exactly what happens if
+                    // capture waits until after `window.close()` below.
+                    let result = capture_area_pixels(area)
+                        .map(|data| Some(AreaOutcome::Captured(data)))
+                        .map_err(|e| SelectionError::CaptureFailed(e.to_string()));
+                    let _ = result_tx_drag.send(result);
                     if let Some(window) = window_weak.upgrade() {
                         window.close();
                     }
