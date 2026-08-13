@@ -49,6 +49,8 @@ pub struct RecordingConfig {
     pub height: Option<u32>,
     pub x: Option<i32>,
     pub y: Option<i32>,
+    pub screen_width: Option<u32>,
+    pub screen_height: Option<u32>,
     pub highlight_cursor: bool,
     pub highlight_color: String,
     pub highlight_radius: u32,
@@ -64,6 +66,8 @@ impl Default for RecordingConfig {
             height: None,
             x: None,
             y: None,
+            screen_width: None,
+            screen_height: None,
             highlight_cursor: false,
             highlight_color: "#FFFF00".to_string(),
             highlight_radius: 30,
@@ -357,7 +361,7 @@ async fn build_pipeline(config: &RecordingConfig, profile: &EncoderProfile, outp
 
     // Get video source
     let video_source = if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        get_wayland_source().await?
+        get_wayland_source(config).await?
     } else {
         get_x11_source(config)?
     };
@@ -398,7 +402,22 @@ pub fn save_screencast_token(token: &str) {
     let _ = std::fs::write(&path, token);
 }
 
-async fn get_wayland_source() -> RecordResult<String> {
+/// Build the `videocrop` GStreamer stage that crops a PipeWire monitor
+/// stream down to the selected region, given the selection rect
+/// `(x, y, width, height)` and the full monitor's `(screen_width,
+/// screen_height)`. Margins are clamped to `0` (never negative) via i64
+/// arithmetic so a region flush against the screen edge doesn't underflow.
+/// Returns the `" ! videocrop ..."` suffix to append to the base source.
+fn videocrop_suffix(x: i32, y: i32, width: u32, height: u32, screen_width: u32, screen_height: u32) -> String {
+    let left = x.max(0);
+    let top = y.max(0);
+    let right = ((screen_width as i64) - (x as i64) - (width as i64)).max(0);
+    let bottom = ((screen_height as i64) - (y as i64) - (height as i64)).max(0);
+
+    format!(" ! videocrop left={} top={} right={} bottom={}", left, top, right, bottom)
+}
+
+async fn get_wayland_source(config: &RecordingConfig) -> RecordResult<String> {
     use ashpd::desktop::screencast::Screencast;
     use zbus::zvariant::Value;
 
@@ -464,7 +483,22 @@ async fn get_wayland_source() -> RecordResult<String> {
     let node_id = stream.0;
     println!("Got PipeWire Node ID: {}", node_id);
 
-    Ok(format!("pipewiresrc path={} do-timestamp=true", node_id))
+    let base_source = format!("pipewiresrc path={} do-timestamp=true", node_id);
+    Ok(apply_wayland_crop(base_source, config))
+}
+
+/// Append the `videocrop` suffix to `base_source` when a full crop rect
+/// (`x`/`y`/`width`/`height`) and screen size (`screen_width`/
+/// `screen_height`) are all known; otherwise return `base_source`
+/// unchanged -- today's whole-monitor/whole-window behavior for `record
+/// screen`/`record window`, which must not regress.
+fn apply_wayland_crop(base_source: String, config: &RecordingConfig) -> String {
+    match (config.x, config.y, config.width, config.height, config.screen_width, config.screen_height) {
+        (Some(x), Some(y), Some(width), Some(height), Some(screen_width), Some(screen_height)) => {
+            format!("{}{}", base_source, videocrop_suffix(x, y, width, height, screen_width, screen_height))
+        }
+        _ => base_source,
+    }
 }
 
 async fn wait_for_response(
@@ -590,7 +624,7 @@ async fn record_gif_rust(config: RecordingConfig) -> RecordResult<PathBuf> {
 
     // Build pipeline: Source -> videoconvert -> rgba -> appsink
     let source_str = if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        get_wayland_source().await? 
+        get_wayland_source(&config).await?
     } else {
         get_x11_source(&config)?
     };
@@ -722,4 +756,71 @@ async fn record_gif_rust(config: RecordingConfig) -> RecordResult<PathBuf> {
 
     println!("GIF saved to {:?}", config.output_path);
     Ok(config.output_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn test_videocrop_suffix_interior_region() {
+        // 300x200 region at (100,100) on a 1920x1080 screen.
+        let suffix = videocrop_suffix(100, 100, 300, 200, 1920, 1080);
+        assert_eq!(suffix, " ! videocrop left=100 top=100 right=1520 bottom=780");
+    }
+
+    #[test]
+    fn test_videocrop_suffix_flush_against_right_bottom_edge() {
+        // Region touching the screen's right/bottom edge: margins must be
+        // exactly 0, not negative.
+        let suffix = videocrop_suffix(1620, 880, 300, 200, 1920, 1080);
+        assert_eq!(suffix, " ! videocrop left=1620 top=880 right=0 bottom=0");
+    }
+
+    #[test]
+    fn test_apply_wayland_crop_omits_crop_when_any_field_missing() {
+        // record screen / record window today's behavior: no full crop
+        // rect + screen size means the base pipewiresrc string comes back
+        // unchanged. Exercises the real function get_wayland_source calls,
+        // not a re-derived copy of its condition.
+        let base = "pipewiresrc path=42 do-timestamp=true".to_string();
+        let config = RecordingConfig {
+            x: Some(100),
+            y: Some(100),
+            width: Some(300),
+            height: Some(200),
+            screen_width: None,
+            screen_height: None,
+            ..RecordingConfig::default()
+        };
+
+        assert_eq!(apply_wayland_crop(base.clone(), &config), base);
+    }
+
+    #[test]
+    fn test_apply_wayland_crop_appends_suffix_when_all_fields_present() {
+        let base = "pipewiresrc path=42 do-timestamp=true".to_string();
+        let config = RecordingConfig {
+            x: Some(100),
+            y: Some(100),
+            width: Some(300),
+            height: Some(200),
+            screen_width: Some(1920),
+            screen_height: Some(1080),
+            ..RecordingConfig::default()
+        };
+
+        assert_eq!(
+            apply_wayland_crop(base, &config),
+            "pipewiresrc path=42 do-timestamp=true ! videocrop left=100 top=100 right=1520 bottom=780"
+        );
+    }
+
+    #[test]
+    fn test_recording_config_default_has_no_screen_dimensions() {
+        let config = RecordingConfig::default();
+        assert_eq!(config.screen_width, None);
+        assert_eq!(config.screen_height, None);
+    }
 }

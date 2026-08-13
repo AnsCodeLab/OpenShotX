@@ -9,10 +9,13 @@
 //!   cargo run -- ocr <image>
 
 use openshotx::{
-    backend::{X11Backend, WaylandBackend, CaptureData, DisplayBackend},
+    backend::{X11Backend, WaylandBackend, CaptureData, DisplayBackend, DisplayResult},
     capture::{save_capture, SaveConfig, ImageFormat, copy_image_to_clipboard},
     select_area,
     select_window,
+    AreaAction,
+    AreaPick,
+    SelectionArea,
     ocr::{extract_text_from_path, OcrConfig},
     recording::{RecordingConfig, start_recording, copy_to_clipboard as copy_recording_to_clipboard},
     scrolling::{ScrollCaptureConfig, capture_scrolling_pw, save_scrolling_capture},
@@ -38,7 +41,7 @@ async fn main() {
                 print_usage();
                 std::process::exit(1);
             }
-            run_capture(&args, &config);
+            run_capture(&args, &config).await;
         }
         "record" => {
             if args.len() < 3 {
@@ -134,7 +137,7 @@ async fn main() {
         println!("  cargo run -- scroll");
     }
     
-fn run_capture(args: &[String], config: &Config) {
+async fn run_capture(args: &[String], config: &Config) {
         // Parse capture type
         let capture_type = args[2].as_str();
     
@@ -234,17 +237,53 @@ fn run_capture(args: &[String], config: &Config) {
             }
         }
     
-        // Select backend
-        let capture: CaptureData = if WaylandBackend::is_supported() {
+        // "area" always goes through the GTK overlay's Capture/Record
+        // control panel when X11/XWayland is reachable, regardless of
+        // Wayland vs X11 session type (issue #1: on Wayland, preferring
+        // WaylandBackend here made the overlay/panel unreachable and
+        // capture area fell back to GNOME's native picker, which has no
+        // recording toggle). "screen"/"window" keep the existing
+        // Wayland-preferred backend selection, unchanged.
+        let capture: CaptureData = if capture_type == "area" {
+            if X11Backend::is_supported() {
+                println!("Select an area by dragging the mouse, then choose Capture or Record from the panel.");
+                match select_area(AreaAction::Capture).expect("Failed to show area selection overlay") {
+                    Some(AreaPick { action: AreaAction::Capture, area, .. }) => {
+                        capture_area_pixels(area).expect("Area capture failed")
+                    }
+                    Some(AreaPick { action: AreaAction::Record, area, screen_width, screen_height }) => {
+                        // Switched to recording from the control panel.
+                        if let Err(e) = record_area_default(config, area, screen_width, screen_height, notify).await {
+                            eprintln!("Recording failed: {}", e);
+                            std::process::exit(1);
+                        }
+                        std::process::exit(0);
+                    }
+                    None => {
+                        eprintln!("Selection cancelled");
+                        std::process::exit(0);
+                    }
+                }
+            } else if WaylandBackend::is_supported() {
+                // No X11/XWayland reachable at all (rare Wayland-only
+                // compositor): fall back to today's native interactive
+                // portal picker. No Capture/Record toggle here -- explicit,
+                // disclosed scope narrowing, not a regression from before
+                // this fix existed.
+                println!("Note: On Wayland, area capture requires user interaction via portal dialog");
+                WaylandBackend::new().expect("Failed to initialize Wayland backend")
+                    .capture_area(0, 0, 0, 0).expect("Area capture failed")
+            } else {
+                eprintln!("Error: No supported display backend found");
+                eprintln!("This application requires X11 or Wayland");
+                std::process::exit(1);
+            }
+        } else if WaylandBackend::is_supported() {
             println!("Using Wayland backend...");
             let backend = WaylandBackend::new().expect("Failed to initialize Wayland backend");
     
             match capture_type {
                 "screen" => backend.capture_screen().expect("Screen capture failed"),
-                "area" => {
-                    println!("Note: On Wayland, area capture requires user interaction via portal dialog");
-                    backend.capture_area(0, 0, 0, 0).expect("Area capture failed")
-                }
                 "window" => {
                     println!("Note: On Wayland, window capture requires user interaction via portal dialog");
                     backend.capture_window(0).expect("Window capture failed")
@@ -261,23 +300,6 @@ fn run_capture(args: &[String], config: &Config) {
     
             match capture_type {
                 "screen" => backend.capture_screen().expect("Screen capture failed"),
-                "area" => {
-                    // Show GTK overlay for area selection
-                    println!("Select an area by dragging the mouse. Press ESC to cancel.");
-                    let selection = select_area()
-                        .expect("Failed to show area selection overlay");
-    
-                    match selection {
-                        Some(area) => {
-                            backend.capture_area(area.x, area.y, area.width, area.height)
-                                .expect("Area capture failed")
-                        }
-                        None => {
-                            eprintln!("Selection cancelled");
-                            std::process::exit(0);
-                        }
-                    }
-                }
                 "window" => {
                     eprintln!("Error: window capture by ID not yet supported via CLI");
                     eprintln!("Use 'capture screen' and crop manually");
@@ -429,6 +451,94 @@ fn run_capture(args: &[String], config: &Config) {
             .map(|_| ())
     }
 
+    /// Capture the pixels of `area`, choosing the right backend for this
+    /// session: on Wayland, `X11Backend::capture_area` can't see real
+    /// desktop content (XWayland's root window doesn't reflect Wayland
+    /// client compositing), so grab the full monitor through the portal
+    /// and crop client-side; on native X11, capture the region directly.
+    fn capture_area_pixels(area: SelectionArea) -> DisplayResult<CaptureData> {
+        if WaylandBackend::is_supported() {
+            WaylandBackend::new()?
+                .capture_screen()?
+                .crop(area.x, area.y, area.width, area.height)
+        } else {
+            X11Backend::new()?.capture_area(area.x, area.y, area.width, area.height)
+        }
+    }
+
+    /// Capture and save a screenshot of `area` using config defaults (no
+    /// CLI flags), used when the user picks Capture from the control panel
+    /// while running `record area`.
+    fn capture_area_default(config: &Config, area: SelectionArea, notify: bool) -> Result<(), Box<dyn std::error::Error>> {
+        let capture = capture_area_pixels(area)
+            .map_err(|e| format!("Area capture failed: {}", e))?;
+
+        let format = if matches!(config.capture.format, openshotx::config::CaptureFormat::Jpeg) {
+            ImageFormat::Jpeg { quality: config.capture.jpeg_quality }
+        } else {
+            ImageFormat::Png
+        };
+        let output_dir = PathBuf::from(shellexpand::tilde(&config.paths.screenshots).as_ref());
+        let save_config = SaveConfig::default()
+            .with_format(format)
+            .with_cursor(config.capture.include_cursor)
+            .with_output_dir(output_dir)
+            .with_prefix(config.capture.prefix.clone());
+
+        let saved_path = save_capture(&capture, &save_config)?;
+        println!("Saved to: {}", saved_path.display());
+
+        if config.capture.copy_to_clipboard {
+            if let Err(e) = copy_image_to_clipboard(&saved_path) {
+                eprintln!("Warning: Failed to copy image to clipboard: {}", e);
+            }
+        }
+        if notify {
+            send_notification("Screenshot saved", &saved_path.display().to_string());
+        }
+        Ok(())
+    }
+
+    /// Record `area` using config defaults (no CLI flags), used when the
+    /// user picks Record from the control panel while running `capture area`.
+    /// `screen_width`/`screen_height` are the monitor-0 dimensions the
+    /// overlay measured `area` against (needed to crop the Wayland
+    /// ScreenCast stream down to `area`; ignored on the native X11 path).
+    async fn record_area_default(
+        config: &Config,
+        area: SelectionArea,
+        screen_width: u32,
+        screen_height: u32,
+        notify: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let ext = match config.recording.format {
+            openshotx::config::RecordingFormat::Mp4 => "mp4",
+            openshotx::config::RecordingFormat::Webm => "webm",
+        };
+        let rec_config = RecordingConfig {
+            output_path: openshotx::recording::generate_recording_filename(
+                &config.paths.videos,
+                &config.recording.prefix,
+                ext,
+            ),
+            highlight_cursor: config.recording.highlight_cursor,
+            highlight_color: config.recording.highlight_color.clone(),
+            highlight_radius: config.recording.highlight_radius,
+            x: Some(area.x),
+            y: Some(area.y),
+            width: Some(area.width as u32),
+            height: Some(area.height as u32),
+            screen_width: Some(screen_width),
+            screen_height: Some(screen_height),
+        };
+
+        let final_path = start_recording(rec_config).await?;
+        if notify {
+            send_notification("Recording saved", &final_path.display().to_string());
+        }
+        Ok(())
+    }
+
     fn run_ocr(args: &[String]) {
         let image_path = &args[2];
     
@@ -569,21 +679,35 @@ async fn run_record(args: &[String], config: &Config) -> Result<(), Box<dyn std:
             
                 // Handle area/window selection if needed
                 if record_type == "area" {
-                    // If on X11, launch overlay
-                    if std::env::var("WAYLAND_DISPLAY").is_err() && X11Backend::is_supported() {
-                         println!("Select an area to record by dragging the mouse. Press ESC to cancel.");
+                    // Always try the overlay when X11/XWayland is reachable
+                    // (issue #1: gating on WAYLAND_DISPLAY-unset meant a
+                    // Wayland session got no region UI at all here).
+                    if X11Backend::is_supported() {
+                         println!("Select an area to record, then choose Capture or Record from the panel.");
 
-                         let selection = select_area().map_err(|e| format!("Selection failed: {}", e))?;
-                         if let Some(area) = selection {
-                             rec_config.x = Some(area.x);
-                             rec_config.y = Some(area.y);
-                             rec_config.width = Some(area.width as u32);
-                             rec_config.height = Some(area.height as u32);
-                         } else {
-                             println!("Selection cancelled.");
-                             return Ok(());
+                         match select_area(AreaAction::Record).map_err(|e| format!("Selection failed: {}", e))? {
+                             Some(AreaPick { action: AreaAction::Record, area, screen_width, screen_height }) => {
+                                 rec_config.x = Some(area.x);
+                                 rec_config.y = Some(area.y);
+                                 rec_config.width = Some(area.width as u32);
+                                 rec_config.height = Some(area.height as u32);
+                                 rec_config.screen_width = Some(screen_width);
+                                 rec_config.screen_height = Some(screen_height);
+                             }
+                             Some(AreaPick { action: AreaAction::Capture, area, .. }) => {
+                                 // Switched to a screenshot from the control panel.
+                                 capture_area_default(config, area, notify)?;
+                                 return Ok(());
+                             }
+                             None => {
+                                 println!("Selection cancelled.");
+                                 return Ok(());
+                             }
                          }
                     } else {
+                        // No X11/XWayland reachable at all: today's
+                        // behavior unchanged (no region UI, whole-screen
+                        // fallback via the persisted portal grant).
                         println!("Wayland: portal will let you select a screen or window to record.");
                     }
                 } else if record_type == "window" {

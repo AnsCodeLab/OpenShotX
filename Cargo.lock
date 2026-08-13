@@ -1982,6 +1982,7 @@ dependencies = [
  "libadwaita",
  "libc",
  "mockall",
+ "parking_lot",
  "pretty_assertions",
  "serde",
  "serde_yml",

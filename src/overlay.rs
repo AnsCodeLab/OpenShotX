@@ -10,10 +10,11 @@ use gtk4::{
     Application, ApplicationWindow, EventControllerKey, GestureDrag,
 };
 use gtk4::gdk::Key;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 /// Selected area coordinates
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SelectionArea {
     pub x: i32,
     pub y: i32,
@@ -41,9 +42,6 @@ impl SelectionArea {
     }
 }
 
-/// Result of area selection
-pub type SelectionResult = Result<Option<SelectionArea>, SelectionError>;
-
 #[derive(Debug, thiserror::Error)]
 pub enum SelectionError {
     #[error("GTK initialization failed: {0}")]
@@ -52,6 +50,31 @@ pub enum SelectionError {
     #[error("Selection was cancelled by user")]
     Cancelled,
 }
+
+/// Which action to perform with a selected area, chosen from the on-screen
+/// control panel after the drag finishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AreaAction {
+    #[default]
+    Capture,
+    Record,
+}
+
+/// Result of picking a rectangle through the control panel: which action
+/// was chosen, the rectangle itself, and the monitor-0 screen dimensions
+/// used to lay out the panel at the moment of the hit-test (needed by
+/// callers that must crop a differently-sized capture down to this area).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AreaPick {
+    pub action: AreaAction,
+    pub area: SelectionArea,
+    pub screen_width: u32,
+    pub screen_height: u32,
+}
+
+/// Result of an area selection made through the control panel: the chosen
+/// action, rectangle, and screen size, or `None` if the user cancelled.
+pub type AreaSelectionResult = Result<Option<AreaPick>, SelectionError>;
 
 /// State for the area selector overlay
 struct SelectorState {
@@ -62,6 +85,15 @@ struct SelectorState {
     is_dragging: bool,
     cancelled: bool,
     completed: bool,
+    /// Action highlighted as primary in the control panel (the one matching
+    /// whichever command opened the overlay).
+    default_action: AreaAction,
+    /// Absolute press position when a press started while the control panel
+    /// was showing (`completed == true`). Set on `drag_begin`, consumed on
+    /// the matching `drag_end` to hit-test the panel buttons. Kept separate
+    /// from `start_x`/`start_y` so a stray press over the panel never
+    /// clobbers the already-drawn selection rectangle.
+    panel_press: Option<(f64, f64)>,
 }
 
 impl Default for SelectorState {
@@ -74,6 +106,32 @@ impl Default for SelectorState {
             is_dragging: false,
             cancelled: false,
             completed: false,
+            default_action: AreaAction::default(),
+            panel_press: None,
+        }
+    }
+}
+
+/// RAII guard that restores the prior `GDK_BACKEND` env var (or removes it
+/// if it wasn't set before) when dropped, so `AreaSelector::run` leaves the
+/// process env exactly as it found it on every exit path: success, a GTK
+/// init error, or an unwind.
+struct GdkBackendGuard {
+    prior: Option<String>,
+}
+
+impl Drop for GdkBackendGuard {
+    fn drop(&mut self) {
+        // SAFETY: by the time this guard drops, `run()`'s `app.run_with_args`
+        // call above has already returned, so GDK has long since read
+        // `GDK_BACKEND` during initialization; nothing later in this
+        // process reads it, so restoring here has no concurrent-reader
+        // race.
+        unsafe {
+            match &self.prior {
+                Some(value) => std::env::set_var("GDK_BACKEND", value),
+                None => std::env::remove_var("GDK_BACKEND"),
+            }
         }
     }
 }
@@ -84,25 +142,52 @@ pub struct AreaSelector {
 }
 
 impl AreaSelector {
-    /// Create a new area selector
-    pub fn new() -> Self {
+    /// Create a new area selector. `default_action` is highlighted as the
+    /// primary button in the control panel (the action the caller asked
+    /// for), but the user is always free to pick either button.
+    pub fn new(default_action: AreaAction) -> Self {
         Self {
-            state: Arc::new(Mutex::new(SelectorState::default())),
+            state: Arc::new(Mutex::new(SelectorState {
+                default_action,
+                ..SelectorState::default()
+            })),
         }
     }
 
     /// Run the area selection dialog
     ///
-    /// Returns `Ok(Some(area))` if user selected an area
-    /// Returns `Ok(None)` if user cancelled (ESC)
+    /// Returns `Ok(Some(AreaPick))` if the user drew a region and picked
+    /// Capture or Record from the control panel.
+    /// Returns `Ok(None)` if user cancelled (ESC).
     /// Returns `Err` if initialization failed
-    pub fn run(&self) -> SelectionResult {
+    pub fn run(&self) -> AreaSelectionResult {
         let state = self.state.clone();
         let (result_tx, result_rx) = std::sync::mpsc::channel();
 
-        // Create application
+        // GDK prefers the Wayland backend when both are reachable, which
+        // would make this overlay unreachable on a Wayland session (issue
+        // #1: capture/record area must always go through this overlay for
+        // coordinate selection). Force X11 for the lifetime of this call,
+        // restoring the prior value (or removing it) via `GdkBackendGuard`
+        // on every exit path below, success or error.
+        let prior_gdk_backend = std::env::var("GDK_BACKEND").ok();
+        // SAFETY: this runs synchronously at the very start of `run()`,
+        // before `Application::builder()` triggers GDK init and before any
+        // other thread in this process has reason to read `GDK_BACKEND` --
+        // GDK itself hasn't initialized yet, which is the entire point of
+        // setting it first.
+        unsafe {
+            std::env::set_var("GDK_BACKEND", "x11");
+        }
+        let _gdk_backend_guard = GdkBackendGuard { prior: prior_gdk_backend };
+
+        // Create application. NON_UNIQUE: each invocation is a fresh,
+        // one-shot process (hotkey/tray/CLI); it must never hand off to a
+        // still-running instance from a previous invocation via D-Bus
+        // activation, or the new process's window would never appear.
         let app = Application::builder()
             .application_id("com.openshotx.screenshot")
+            .flags(gtk4::gio::ApplicationFlags::NON_UNIQUE)
             .build();
 
         // Clone state for the activate handler
@@ -116,10 +201,222 @@ impl AreaSelector {
 
         // Get the result
         match result_rx.recv() {
-            Ok(Ok(area)) => Ok(area),
+            Ok(Ok(selection)) => Ok(selection),
             Ok(Err(e)) => Err(e),
             Err(_) => Err(SelectionError::InitError("No result received".into())),
         }
+    }
+}
+
+/// Bounding box of a control-panel button, in the same screen-pixel space as
+/// the selection rectangle.
+struct ButtonRect {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+impl ButtonRect {
+    fn contains(&self, px: f64, py: f64) -> bool {
+        px >= self.x && px <= self.x + self.w && py >= self.y && py <= self.y + self.h
+    }
+}
+
+/// Geometry (width, height) of the first monitor, used both to draw the
+/// overlay and to lay out the control panel.
+fn primary_monitor_geometry() -> Option<(f64, f64)> {
+    let display = gdk::Display::default()?;
+    let monitors = display.monitors();
+    if monitors.n_items() == 0 {
+        return None;
+    }
+    let monitor = monitors.item(0)?.downcast::<gdk::Monitor>().ok()?;
+    let geometry = monitor.geometry();
+    Some((geometry.width() as f64, geometry.height() as f64))
+}
+
+/// Lay out the two control-panel buttons (Capture, Record) below the
+/// selection rectangle, clamped to stay on screen (flips above the
+/// selection if there's no room below).
+fn toolbar_layout(
+    sel_x: f64,
+    sel_y: f64,
+    sel_w: f64,
+    sel_h: f64,
+    screen_w: f64,
+    screen_h: f64,
+) -> (ButtonRect, ButtonRect) {
+    const BTN_W: f64 = 120.0;
+    const BTN_H: f64 = 40.0;
+    const GAP: f64 = 10.0;
+    const MARGIN: f64 = 12.0;
+
+    let total_w = BTN_W * 2.0 + GAP;
+    let mut bar_x = sel_x + sel_w / 2.0 - total_w / 2.0;
+    bar_x = bar_x.clamp(MARGIN, (screen_w - total_w - MARGIN).max(MARGIN));
+
+    let mut bar_y = sel_y + sel_h + MARGIN;
+    if bar_y + BTN_H + MARGIN > screen_h {
+        bar_y = (sel_y - MARGIN - BTN_H).max(MARGIN);
+    }
+
+    let capture_rect = ButtonRect { x: bar_x, y: bar_y, w: BTN_W, h: BTN_H };
+    let record_rect = ButtonRect { x: bar_x + BTN_W + GAP, y: bar_y, w: BTN_W, h: BTN_H };
+    (capture_rect, record_rect)
+}
+
+/// Draw one control-panel button: filled rect with a centered label.
+/// `primary` renders the button matching the action that opened the overlay
+/// with an accent color; the other stays neutral.
+fn draw_button(context: &gtk4::cairo::Context, rect: &ButtonRect, label: &str, primary: bool) {
+    if primary {
+        context.set_source_rgba(0.20, 0.47, 0.96, 0.95);
+    } else {
+        context.set_source_rgba(0.20, 0.20, 0.20, 0.90);
+    }
+    context.rectangle(rect.x, rect.y, rect.w, rect.h);
+    let _ = context.fill();
+
+    context.set_source_rgba(1.0, 1.0, 1.0, 0.9);
+    context.set_line_width(1.0);
+    context.rectangle(rect.x, rect.y, rect.w, rect.h);
+    let _ = context.stroke();
+
+    context.set_font_size(14.0);
+    context.set_source_rgba(1.0, 1.0, 1.0, 1.0);
+    if let Ok(extents) = context.text_extents(label) {
+        let text_x = rect.x + rect.w / 2.0 - extents.width() / 2.0 - extents.x_bearing();
+        let text_y = rect.y + rect.h / 2.0 - extents.height() / 2.0 - extents.y_bearing();
+        context.move_to(text_x, text_y);
+        let _ = context.show_text(label);
+    }
+}
+
+/// Outcome of a `drag_begin` event, decided purely from state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BeginOutcome {
+    /// No panel was showing: started tracking a fresh selection drag.
+    StartedDrag,
+    /// The panel was showing: the press was captured for hit-testing on
+    /// release, and the existing selection was left untouched.
+    CapturedPanelPress,
+}
+
+/// Handle a drag-gesture press at absolute position `(x, y)`.
+fn handle_drag_begin(state: &mut SelectorState, x: f64, y: f64) -> BeginOutcome {
+    if state.completed {
+        // Don't touch the already-drawn selection; just remember where
+        // this press landed so `handle_drag_end` can hit-test it.
+        state.panel_press = Some((x, y));
+        return BeginOutcome::CapturedPanelPress;
+    }
+    state.start_x = x;
+    state.start_y = y;
+    state.current_x = x;
+    state.current_y = y;
+    state.is_dragging = true;
+    BeginOutcome::StartedDrag
+}
+
+/// Handle a drag-gesture update at `(offset_x, offset_y)` from the press.
+/// Returns `true` if the selection rectangle changed and needs a redraw.
+fn handle_drag_update(state: &mut SelectorState, offset_x: f64, offset_y: f64) -> bool {
+    if state.completed || !state.is_dragging {
+        return false;
+    }
+    state.current_x = state.start_x + offset_x;
+    state.current_y = state.start_y + offset_y;
+    true
+}
+
+/// Outcome of a `drag_end` event, decided purely from state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum EndOutcome {
+    /// Neither a selection drag nor a panel press was in progress.
+    Ignored,
+    /// A valid selection was drawn: the panel should now be shown.
+    SelectionCompleted,
+    /// An invalid (zero-area) drag: treat as cancellation.
+    Cancelled,
+    /// A panel button was hit: this is the final result.
+    PanelAction(AreaAction, SelectionArea, (f64, f64)),
+    /// The press/release landed outside the panel: selection discarded so
+    /// the user can drag a new one.
+    PanelDismissed,
+}
+
+/// Handle a drag-gesture release at `(offset_x, offset_y)` from the press
+/// that started this sequence (as reported by `GestureDrag`). `screen` is
+/// the monitor size used to lay out the panel, when available.
+fn handle_drag_end(
+    state: &mut SelectorState,
+    offset_x: f64,
+    offset_y: f64,
+    screen: Option<(f64, f64)>,
+) -> EndOutcome {
+    if let Some((press_x, press_y)) = state.panel_press.take() {
+        // This press/release started while the panel was showing: hit-test
+        // the release point against the panel buttons instead of touching
+        // the selection rectangle.
+        let release_x = press_x + offset_x;
+        let release_y = press_y + offset_y;
+        let sel_x = state.start_x.min(state.current_x);
+        let sel_y = state.start_y.min(state.current_y);
+        let sel_w = (state.current_x - state.start_x).abs();
+        let sel_h = (state.current_y - state.start_y).abs();
+
+        let hit = screen.and_then(|(screen_w, screen_h)| {
+            let (capture_rect, record_rect) =
+                toolbar_layout(sel_x, sel_y, sel_w, sel_h, screen_w, screen_h);
+            if capture_rect.contains(release_x, release_y) {
+                Some((AreaAction::Capture, (screen_w, screen_h)))
+            } else if record_rect.contains(release_x, release_y) {
+                Some((AreaAction::Record, (screen_w, screen_h)))
+            } else {
+                None
+            }
+        });
+
+        return match hit {
+            Some((action, screen_dims)) => {
+                let area = SelectionArea {
+                    x: sel_x as i32,
+                    y: sel_y as i32,
+                    width: sel_w as i32,
+                    height: sel_h as i32,
+                };
+                EndOutcome::PanelAction(action, area, screen_dims)
+            }
+            None => {
+                state.completed = false;
+                EndOutcome::PanelDismissed
+            }
+        };
+    }
+
+    if state.completed || !state.is_dragging {
+        return EndOutcome::Ignored;
+    }
+    state.current_x = state.start_x + offset_x;
+    state.current_y = state.start_y + offset_y;
+    state.is_dragging = false;
+
+    let area = SelectionArea {
+        x: state.start_x as i32,
+        y: state.start_y as i32,
+        width: (state.current_x - state.start_x) as i32,
+        height: (state.current_y - state.start_y) as i32,
+    }
+    .normalize();
+
+    if area.is_valid() {
+        // Keep the window open: show the Capture/Record control panel
+        // below the selection and wait for the user to pick.
+        state.completed = true;
+        EndOutcome::SelectionCompleted
+    } else {
+        EndOutcome::Cancelled
     }
 }
 
@@ -127,7 +424,7 @@ impl AreaSelector {
 fn setup_window(
     app: &Application,
     state: Arc<Mutex<SelectorState>>,
-    result_tx: std::sync::mpsc::Sender<SelectionResult>,
+    result_tx: std::sync::mpsc::Sender<AreaSelectionResult>,
 ) {
     // Get the display and monitor for screen dimensions
     let display = match gdk::Display::default() {
@@ -202,7 +499,15 @@ fn setup_window(
     // Set the drawing area as the child
     window.set_child(Some(&drawing_area));
 
-    // Setup drag gesture for area selection
+    // Setup drag gesture for area selection. It also handles the control
+    // panel: once a selection is completed (`completed == true`), a press
+    // is remembered as `panel_press` instead of restarting the selection,
+    // and the matching release is hit-tested against the panel buttons.
+    // Everything funnels through this single gesture deliberately -- a
+    // second gesture controller on the same widget risks GTK claiming the
+    // press/release sequence for one gesture and never delivering it to
+    // the other, which is exactly the "panel doesn't respond" failure mode
+    // this is meant to fix.
     let drag_gesture = GestureDrag::builder()
         .propagation_phase(gtk4::PropagationPhase::Capture)
         .build();
@@ -219,16 +524,14 @@ fn setup_window(
         #[strong]
         drawing_area_weak,
         move |_gesture, x, y| {
-            let mut st = state_drag.lock().unwrap();
-            st.start_x = x;
-            st.start_y = y;
-            st.current_x = x;
-            st.current_y = y;
-            st.is_dragging = true;
+            let mut st = state_drag.lock();
+            let outcome = handle_drag_begin(&mut st, x, y);
             drop(st);
 
-            if let Some(drawing_area) = drawing_area_weak.upgrade() {
-                drawing_area.queue_draw();
+            if matches!(outcome, BeginOutcome::StartedDrag) {
+                if let Some(drawing_area) = drawing_area_weak.upgrade() {
+                    drawing_area.queue_draw();
+                }
             }
         }
     ));
@@ -239,13 +542,14 @@ fn setup_window(
         #[strong]
         drawing_area_weak,
         move |_gesture, x, y| {
-            let mut st = state_drag.lock().unwrap();
-            st.current_x = st.start_x + x;
-            st.current_y = st.start_y + y;
+            let mut st = state_drag.lock();
+            let changed = handle_drag_update(&mut st, x, y);
             drop(st);
 
-            if let Some(drawing_area) = drawing_area_weak.upgrade() {
-                drawing_area.queue_draw();
+            if changed {
+                if let Some(drawing_area) = drawing_area_weak.upgrade() {
+                    drawing_area.queue_draw();
+                }
             }
         }
     ));
@@ -256,37 +560,39 @@ fn setup_window(
         #[strong]
         window_weak,
         #[strong]
+        drawing_area_weak,
+        #[strong]
         result_tx_drag,
         move |_gesture, x, y| {
-            let mut st = state_drag.lock().unwrap();
-            st.current_x = st.start_x + x;
-            st.current_y = st.start_y + y;
-            st.is_dragging = false;
-            st.completed = true;
-
-            // Calculate the selection area
-            let area = SelectionArea {
-                x: st.start_x as i32,
-                y: st.start_y as i32,
-                width: (st.current_x - st.start_x) as i32,
-                height: (st.current_y - st.start_y) as i32,
-            }
-            .normalize();
-
+            let mut st = state_drag.lock();
+            let outcome = handle_drag_end(&mut st, x, y, primary_monitor_geometry());
             drop(st);
 
-            // Send the result
-            let result = if area.is_valid() {
-                Ok(Some(area))
-            } else {
-                Ok(None) // Invalid area treated as cancel
-            };
-
-            let _ = result_tx_drag.send(result);
-
-            // Close the window
-            if let Some(window) = window_weak.upgrade() {
-                window.close();
+            match outcome {
+                EndOutcome::Ignored => {}
+                EndOutcome::SelectionCompleted | EndOutcome::PanelDismissed => {
+                    if let Some(drawing_area) = drawing_area_weak.upgrade() {
+                        drawing_area.queue_draw();
+                    }
+                }
+                EndOutcome::Cancelled => {
+                    let _ = result_tx_drag.send(Ok(None));
+                    if let Some(window) = window_weak.upgrade() {
+                        window.close();
+                    }
+                }
+                EndOutcome::PanelAction(action, area, (sw, sh)) => {
+                    let pick = AreaPick {
+                        action,
+                        area,
+                        screen_width: sw as u32,
+                        screen_height: sh as u32,
+                    };
+                    let _ = result_tx_drag.send(Ok(Some(pick)));
+                    if let Some(window) = window_weak.upgrade() {
+                        window.close();
+                    }
+                }
             }
         }
     ));
@@ -307,7 +613,7 @@ fn setup_window(
         state_key,
         move |_, key, _, _| {
             if key == Key::Escape {
-                let mut st = state_key.lock().unwrap();
+                let mut st = state_key.lock();
                 st.cancelled = true;
                 drop(st);
 
@@ -336,33 +642,12 @@ fn draw_overlay(
     _height: i32,
     state: &Arc<Mutex<SelectorState>>,
 ) {
-    let st = state.lock().unwrap();
+    let st = state.lock();
 
-    // Get screen dimensions
-    let display = match gdk::Display::default() {
-        Some(d) => d,
+    let (screen_width, screen_height) = match primary_monitor_geometry() {
+        Some(dims) => dims,
         None => return,
     };
-
-    let monitor = {
-        let monitors = display.monitors();
-        let n = monitors.n_items();
-        if n == 0 {
-            return;
-        }
-        // Get the first monitor from the list model
-        match monitors.item(0) {
-            Some(obj) => match obj.downcast::<gdk::Monitor>() {
-                Ok(m) => m,
-                Err(_) => return,
-            },
-            None => return,
-        }
-    };
-
-    let geometry = monitor.geometry();
-    let screen_width = geometry.width() as f64;
-    let screen_height = geometry.height() as f64;
 
     // Clear to transparent
     context.set_source_rgba(0.0, 0.0, 0.0, 0.0);
@@ -428,6 +713,14 @@ fn draw_overlay(
         context.set_source_rgba(1.0, 1.0, 1.0, 1.0);
         context.move_to(text_x, text_y);
         let _ = context.show_text(&text);
+
+        // Once the drag is done, show the Capture/Record control panel.
+        if st.completed {
+            let (capture_rect, record_rect) =
+                toolbar_layout(x, y, width, height, screen_width, screen_height);
+            draw_button(context, &capture_rect, "📷 Capture", st.default_action == AreaAction::Capture);
+            draw_button(context, &record_rect, "⏺ Record", st.default_action == AreaAction::Record);
+        }
     } else {
         // Not dragging - darken entire screen slightly
         context.set_source_rgba(0.0, 0.0, 0.0, 0.3);
@@ -437,13 +730,15 @@ fn draw_overlay(
 
 impl Default for AreaSelector {
     fn default() -> Self {
-        Self::new()
+        Self::new(AreaAction::default())
     }
 }
 
-/// Convenience function to run area selection
-pub fn select_area() -> SelectionResult {
-    let selector = AreaSelector::new();
+/// Convenience function to run area selection. `default_action` is
+/// highlighted as the primary control-panel button, but the user may still
+/// pick either Capture or Record.
+pub fn select_area(default_action: AreaAction) -> AreaSelectionResult {
+    let selector = AreaSelector::new(default_action);
     selector.run()
 }
 
@@ -561,5 +856,219 @@ mod tests {
         // Negative (before normalization)
         let area = SelectionArea { x: 100, y: 100, width: -200, height: 150 };
         assert!(!area.is_valid());
+    }
+
+    #[test]
+    fn test_button_rect_contains() {
+        let rect = ButtonRect { x: 100.0, y: 200.0, w: 120.0, h: 40.0 };
+        // Inside, including edges
+        assert!(rect.contains(100.0, 200.0));
+        assert!(rect.contains(220.0, 240.0));
+        assert!(rect.contains(160.0, 220.0));
+        // Outside
+        assert!(!rect.contains(99.0, 220.0));
+        assert!(!rect.contains(221.0, 220.0));
+        assert!(!rect.contains(160.0, 199.0));
+        assert!(!rect.contains(160.0, 241.0));
+    }
+
+    #[test]
+    fn test_toolbar_layout_below_selection_when_room() {
+        let (capture_rect, record_rect) = toolbar_layout(500.0, 500.0, 300.0, 200.0, 1920.0, 1080.0);
+        // Panel sits below the selection (start_y > selection bottom)
+        assert!(capture_rect.y > 500.0 + 200.0);
+        assert_eq!(capture_rect.y, record_rect.y);
+        // Record button sits to the right of Capture with no overlap
+        assert!(record_rect.x >= capture_rect.x + capture_rect.w);
+        // Panel centered under the selection
+        let panel_center = capture_rect.x + (record_rect.x + record_rect.w - capture_rect.x) / 2.0;
+        assert!((panel_center - (500.0 + 300.0 / 2.0)).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_toolbar_layout_flips_above_when_no_room_below() {
+        // Selection hugging the bottom edge of the screen
+        let (capture_rect, _) = toolbar_layout(500.0, 1000.0, 300.0, 70.0, 1920.0, 1080.0);
+        // Panel must not run past the bottom of the screen
+        assert!(capture_rect.y + capture_rect.h <= 1080.0);
+        // And must sit above the selection's top edge
+        assert!(capture_rect.y + capture_rect.h <= 1000.0);
+    }
+
+    #[test]
+    fn test_toolbar_layout_clamped_within_screen_horizontally() {
+        // Selection hugging the left edge: panel must not go off-screen to the left
+        let (capture_rect, record_rect) = toolbar_layout(0.0, 500.0, 20.0, 20.0, 1920.0, 1080.0);
+        assert!(capture_rect.x >= 0.0);
+        assert!(record_rect.x + record_rect.w <= 1920.0);
+
+        // Selection hugging the right edge: panel must not go off-screen to the right
+        let (capture_rect, record_rect) = toolbar_layout(1900.0, 500.0, 20.0, 20.0, 1920.0, 1080.0);
+        assert!(capture_rect.x >= 0.0);
+        assert!(record_rect.x + record_rect.w <= 1920.0);
+    }
+
+    #[test]
+    fn test_area_action_default_is_capture() {
+        assert_eq!(AreaAction::default(), AreaAction::Capture);
+    }
+
+    /// End-to-end simulation of the exact reported bug: drag out a
+    /// selection, then click a control-panel button. Before this fix, any
+    /// press after the drag finished was misread as the start of a brand
+    /// new drag (the selection kept being redrawn and the panel button was
+    /// never actually hit). This drives the real gesture handlers used by
+    /// `setup_window`, just without any GTK/X11 involved.
+    #[test]
+    fn test_drag_then_panel_click_selects_record() {
+        let mut state = SelectorState::default();
+        let screen = Some((1920.0, 1080.0));
+
+        // 1. Drag out a selection from (100,100) to (400,300).
+        assert_eq!(handle_drag_begin(&mut state, 100.0, 100.0), BeginOutcome::StartedDrag);
+        assert!(state.is_dragging);
+        assert!(handle_drag_update(&mut state, 300.0, 200.0));
+        assert_eq!(
+            handle_drag_end(&mut state, 300.0, 200.0, screen),
+            EndOutcome::SelectionCompleted
+        );
+        assert!(state.completed);
+        assert!(state.panel_press.is_none());
+
+        // 2. Press down on the Record button drawn for this selection.
+        let (capture_rect, record_rect) = toolbar_layout(100.0, 100.0, 300.0, 200.0, 1920.0, 1080.0);
+        let record_x = record_rect.x + record_rect.w / 2.0;
+        let record_y = record_rect.y + record_rect.h / 2.0;
+        assert_eq!(
+            handle_drag_begin(&mut state, record_x, record_y),
+            BeginOutcome::CapturedPanelPress
+        );
+        // Critical: the press over the panel must NOT restart or move the
+        // already-drawn selection rectangle.
+        assert_eq!(state.start_x, 100.0);
+        assert_eq!(state.start_y, 100.0);
+        assert_eq!(state.current_x, 400.0);
+        assert_eq!(state.current_y, 300.0);
+        assert!(!state.is_dragging);
+
+        // 3. Release on the same spot: must resolve to Record on the
+        // original selection, not a fresh/corrupted one.
+        let outcome = handle_drag_end(&mut state, 0.0, 0.0, screen);
+        assert_eq!(
+            outcome,
+            EndOutcome::PanelAction(
+                AreaAction::Record,
+                SelectionArea { x: 100, y: 100, width: 300, height: 200 },
+                (1920.0, 1080.0)
+            )
+        );
+        // Sanity: the two buttons are distinct rects (Record isn't Capture).
+        assert_ne!(capture_rect.x, record_rect.x);
+    }
+
+    #[test]
+    fn test_drag_then_panel_click_selects_capture() {
+        let mut state = SelectorState::default();
+        let screen = Some((1920.0, 1080.0));
+
+        handle_drag_begin(&mut state, 100.0, 100.0);
+        handle_drag_update(&mut state, 300.0, 200.0);
+        handle_drag_end(&mut state, 300.0, 200.0, screen);
+
+        let (capture_rect, _) = toolbar_layout(100.0, 100.0, 300.0, 200.0, 1920.0, 1080.0);
+        let cx = capture_rect.x + capture_rect.w / 2.0;
+        let cy = capture_rect.y + capture_rect.h / 2.0;
+        handle_drag_begin(&mut state, cx, cy);
+        let outcome = handle_drag_end(&mut state, 0.0, 0.0, screen);
+        assert_eq!(
+            outcome,
+            EndOutcome::PanelAction(
+                AreaAction::Capture,
+                SelectionArea { x: 100, y: 100, width: 300, height: 200 },
+                (1920.0, 1080.0)
+            )
+        );
+    }
+
+    #[test]
+    fn test_click_outside_panel_discards_selection_and_allows_redraw() {
+        let mut state = SelectorState::default();
+        let screen = Some((1920.0, 1080.0));
+
+        handle_drag_begin(&mut state, 100.0, 100.0);
+        handle_drag_update(&mut state, 300.0, 200.0);
+        handle_drag_end(&mut state, 300.0, 200.0, screen);
+        assert!(state.completed);
+
+        // Press and release far outside both buttons.
+        handle_drag_begin(&mut state, 10.0, 10.0);
+        assert_eq!(handle_drag_end(&mut state, 0.0, 0.0, screen), EndOutcome::PanelDismissed);
+        assert!(!state.completed);
+
+        // The user must be able to drag a brand new selection afterward.
+        assert_eq!(handle_drag_begin(&mut state, 50.0, 60.0), BeginOutcome::StartedDrag);
+        assert_eq!(state.start_x, 50.0);
+        assert_eq!(state.start_y, 60.0);
+        assert!(state.is_dragging);
+    }
+
+    #[test]
+    fn test_zero_area_drag_is_cancelled_not_completed() {
+        let mut state = SelectorState::default();
+        handle_drag_begin(&mut state, 100.0, 100.0);
+        // No movement at all.
+        assert_eq!(handle_drag_end(&mut state, 0.0, 0.0, None), EndOutcome::Cancelled);
+        assert!(!state.completed);
+    }
+
+    #[test]
+    fn test_drag_update_ignored_once_panel_is_showing() {
+        let mut state = SelectorState::default();
+        let screen = Some((1920.0, 1080.0));
+        handle_drag_begin(&mut state, 100.0, 100.0);
+        handle_drag_update(&mut state, 300.0, 200.0);
+        handle_drag_end(&mut state, 300.0, 200.0, screen);
+        assert!(state.completed);
+
+        // A stray drag_update after completion (e.g. a slightly-moving
+        // press over the panel) must never touch the frozen selection.
+        assert!(!handle_drag_update(&mut state, 999.0, 999.0));
+        assert_eq!(state.current_x, 400.0);
+        assert_eq!(state.current_y, 300.0);
+    }
+
+    /// Mirrors the `AreaPick` construction done in `setup_window`'s GTK
+    /// closure (which isn't itself unit-testable without a live GTK/GDK
+    /// display): given the `EndOutcome::PanelAction` 3-tuple produced by
+    /// the pure drag handlers, confirm the screen dimensions survive the
+    /// `f64 -> u32` conversion correctly, truncation included.
+    #[test]
+    fn test_area_pick_screen_dims_from_panel_action() {
+        let mut state = SelectorState::default();
+        let screen = Some((1920.7, 1080.4));
+
+        handle_drag_begin(&mut state, 100.0, 100.0);
+        handle_drag_update(&mut state, 300.0, 200.0);
+        handle_drag_end(&mut state, 300.0, 200.0, screen);
+
+        let (capture_rect, _) = toolbar_layout(100.0, 100.0, 300.0, 200.0, 1920.7, 1080.4);
+        let cx = capture_rect.x + capture_rect.w / 2.0;
+        let cy = capture_rect.y + capture_rect.h / 2.0;
+        handle_drag_begin(&mut state, cx, cy);
+        let outcome = handle_drag_end(&mut state, 0.0, 0.0, screen);
+
+        let EndOutcome::PanelAction(action, area, (screen_w, screen_h)) = outcome else {
+            panic!("expected PanelAction, got {outcome:?}");
+        };
+        let pick = AreaPick {
+            action,
+            area,
+            screen_width: screen_w as u32,
+            screen_height: screen_h as u32,
+        };
+        assert_eq!(pick.action, AreaAction::Capture);
+        assert_eq!(pick.area, SelectionArea { x: 100, y: 100, width: 300, height: 200 });
+        assert_eq!(pick.screen_width, 1920);
+        assert_eq!(pick.screen_height, 1080);
     }
 }
