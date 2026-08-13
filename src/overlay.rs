@@ -116,17 +116,17 @@ impl Default for SelectorState {
 }
 
 /// RAII guard that restores the prior `GDK_BACKEND` env var (or removes it
-/// if it wasn't set before) when dropped, so `AreaSelector::run` leaves the
-/// process env exactly as it found it on every exit path: success, a GTK
-/// init error, or an unwind.
-struct GdkBackendGuard {
+/// if it wasn't set before) when dropped, so callers of `force_x11_backend`
+/// leave the process env exactly as they found it on every exit path:
+/// success, an init error, or an unwind.
+pub(crate) struct GdkBackendGuard {
     prior: Option<String>,
 }
 
 impl Drop for GdkBackendGuard {
     fn drop(&mut self) {
-        // SAFETY: by the time this guard drops, `run()`'s `app.run_with_args`
-        // call above has already returned, so GDK has long since read
+        // SAFETY: by the time this guard drops, the caller's blocking GTK
+        // main-loop call has already returned, so GDK has long since read
         // `GDK_BACKEND` during initialization; nothing later in this
         // process reads it, so restoring here has no concurrent-reader
         // race.
@@ -137,6 +137,27 @@ impl Drop for GdkBackendGuard {
             }
         }
     }
+}
+
+/// GDK prefers the Wayland backend when both are reachable, which would
+/// make any GTK4 window created this way unreachable on a Wayland session
+/// (issue #1: the overlay's Capture/Record panel was unreachable for
+/// exactly this reason). Forces X11 for the lifetime of the returned
+/// guard -- shared by the selection overlay and the recording HUD, the
+/// two GTK entry points in this codebase that both need a real X11 window
+/// (the overlay for coordinate selection, the HUD for the EWMH
+/// always-on-top hint GTK4 no longer exposes a toolkit API for).
+///
+/// SAFETY: must be called before the caller's `Application`/`Window`
+/// triggers GDK init, and before any other thread in this process has
+/// reason to read `GDK_BACKEND` -- true for both current call sites, each
+/// of which sets this immediately before its first GTK call.
+pub(crate) fn force_x11_backend() -> GdkBackendGuard {
+    let prior = std::env::var("GDK_BACKEND").ok();
+    unsafe {
+        std::env::set_var("GDK_BACKEND", "x11");
+    }
+    GdkBackendGuard { prior }
 }
 
 /// Path to the advisory single-instance lock file: only one area-selection
@@ -233,20 +254,8 @@ impl AreaSelector {
 
         // GDK prefers the Wayland backend when both are reachable, which
         // would make this overlay unreachable on a Wayland session (issue
-        // #1: capture/record area must always go through this overlay for
-        // coordinate selection). Force X11 for the lifetime of this call,
-        // restoring the prior value (or removing it) via `GdkBackendGuard`
-        // on every exit path below, success or error.
-        let prior_gdk_backend = std::env::var("GDK_BACKEND").ok();
-        // SAFETY: this runs synchronously at the very start of `run()`,
-        // before `Application::builder()` triggers GDK init and before any
-        // other thread in this process has reason to read `GDK_BACKEND` --
-        // GDK itself hasn't initialized yet, which is the entire point of
-        // setting it first.
-        unsafe {
-            std::env::set_var("GDK_BACKEND", "x11");
-        }
-        let _gdk_backend_guard = GdkBackendGuard { prior: prior_gdk_backend };
+        // #1). Force X11 for the lifetime of this call.
+        let _gdk_backend_guard = force_x11_backend();
 
         // Create application. NON_UNIQUE: each invocation is a fresh,
         // one-shot process (hotkey/tray/CLI); it must never hand off to a

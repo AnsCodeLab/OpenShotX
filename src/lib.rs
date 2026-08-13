@@ -8,6 +8,7 @@ pub mod capture;
 pub mod overlay;
 pub mod ocr;
 pub mod recording;
+mod recording_hud;
 pub mod scrolling;
 pub mod utils;
 

@@ -180,15 +180,52 @@ pub async fn start_recording(config: RecordingConfig) -> RecordResult<PathBuf> {
         return Err(RecordError::GStreamerError(format!("State change failed: {}", err)));
     }
 
-    // 6. Watch for messages and Ctrl+C
-    let bus = pipeline.bus().ok_or_else(|| RecordError::GStreamerError("Pipeline has no bus".into()))?;
+    // 6. Show the recording HUD (live timer + Pause/Resume/Stop), falling
+    // back to a plain terminal Ctrl+C loop if it can't initialize (e.g. no
+    // display available). Either way, once this resolves the pipeline has
+    // already reached EOS (or the wait for it timed out) and is ready for
+    // the Null cleanup below.
+    let watch_result = match crate::recording_hud::run(pipeline.clone()) {
+        Ok(()) => Ok(()),
+        Err(RecordError::InitError(e)) => {
+            eprintln!("Recording HUD unavailable ({}); falling back to terminal mode.", e);
+            watch_pipeline_via_ctrl_c(&pipeline).await
+        }
+        Err(e) => Err(e),
+    };
+
+    // 7. Cleanup: always attempt this regardless of how watching ended, so
+    // a pipeline error still gets a best-effort finalize before the error
+    // propagates (matches the original single-loop behavior).
+    let null_result = pipeline
+        .set_state(gst::State::Null)
+        .map_err(|e| RecordError::GStreamerError(format!("Failed to set state to Null: {}", e)));
+
+    watch_result?;
+    null_result?;
+
+    println!("Recording saved to {:?}", final_path);
+    if let Ok(metadata) = std::fs::metadata(&final_path) {
+        println!("File size: {:.2} MB", metadata.len() as f64 / 1024.0 / 1024.0);
+    }
     
+    Ok(final_path)
+}
+
+/// Watch `pipeline`'s bus until Ctrl+C or a pipeline error, then wait (up
+/// to 5s) for EOS after sending it. The fallback recording-progress loop
+/// when the HUD can't be shown; on `Ok(())`, `pipeline` has reached EOS (or
+/// the wait for it timed out) and is ready for the caller's own
+/// `set_state(Null)`.
+async fn watch_pipeline_via_ctrl_c(pipeline: &gst::Pipeline) -> RecordResult<()> {
+    let bus = pipeline.bus().ok_or_else(|| RecordError::GStreamerError("Pipeline has no bus".into()))?;
+
     println!("Recording... Press Ctrl+C to stop.");
 
     // Handle Ctrl+C
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
-    
+
     // Phase 1: Recording until Ctrl+C or Error
     let mut stopping = false;
     loop {
@@ -211,7 +248,6 @@ pub async fn start_recording(config: RecordingConfig) -> RecordResult<PathBuf> {
                         }
                         MessageView::Error(err) => {
                             eprintln!("Error from element {:?}: {}", err.src().map(|s| s.name()), err.error());
-                            let _ = pipeline.set_state(gst::State::Null);
                             return Err(RecordError::GStreamerError(err.error().to_string()));
                         }
                         _ => (),
@@ -255,16 +291,7 @@ pub async fn start_recording(config: RecordingConfig) -> RecordResult<PathBuf> {
         }
     }
 
-    // 7. Cleanup
-    pipeline.set_state(gst::State::Null)
-        .map_err(|e| RecordError::GStreamerError(format!("Failed to set state to Null: {}", e)))?;
-
-    println!("Recording saved to {:?}", final_path);
-    if let Ok(metadata) = std::fs::metadata(&final_path) {
-        println!("File size: {:.2} MB", metadata.len() as f64 / 1024.0 / 1024.0);
-    }
-    
-    Ok(final_path)
+    Ok(())
 }
 
 pub fn copy_to_clipboard(path: &PathBuf) -> RecordResult<()> {

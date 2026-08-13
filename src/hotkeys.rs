@@ -41,11 +41,11 @@ pub fn register_gnome(hotkeys: &HotkeysConfig) -> Result<(), String> {
     let schema_base = "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding";
 
     let actions = [
-        ("openshotx-capture-area",   "Capture Area (openshotx)",   "openshotx capture area",   hotkeys.capture_area.as_str()),
-        ("openshotx-capture-screen", "Capture Screen (openshotx)", "openshotx capture screen", hotkeys.capture_screen.as_str()),
-        ("openshotx-capture-window", "Capture Window (openshotx)", "openshotx capture window", hotkeys.capture_window.as_str()),
-        ("openshotx-record-area",    "Record Area (openshotx)",    "openshotx record area",    hotkeys.record_area.as_str()),
-        ("openshotx-record-screen",  "Record Screen (openshotx)",  "openshotx record screen",  hotkeys.record_screen.as_str()),
+        ("openshotx-capture-area",   "Capture Area (openshotx)",   "openshotx capture area --notify",   hotkeys.capture_area.as_str()),
+        ("openshotx-capture-screen", "Capture Screen (openshotx)", "openshotx capture screen --notify", hotkeys.capture_screen.as_str()),
+        ("openshotx-capture-window", "Capture Window (openshotx)", "openshotx capture window --notify", hotkeys.capture_window.as_str()),
+        ("openshotx-record-area",    "Record Area (openshotx)",    "openshotx record area --notify",    hotkeys.record_area.as_str()),
+        ("openshotx-record-screen",  "Record Screen (openshotx)",  "openshotx record screen --notify",  hotkeys.record_screen.as_str()),
     ];
 
     for (id, name, command, binding) in &actions {
@@ -70,11 +70,11 @@ pub fn register_gnome(hotkeys: &HotkeysConfig) -> Result<(), String> {
 
 pub fn register_kde(hotkeys: &HotkeysConfig) -> Result<(), String> {
     let actions = [
-        ("capture-area",   "openshotx capture area",   hotkeys.capture_area.as_str()),
-        ("capture-screen", "openshotx capture screen", hotkeys.capture_screen.as_str()),
-        ("capture-window", "openshotx capture window", hotkeys.capture_window.as_str()),
-        ("record-area",    "openshotx record area",    hotkeys.record_area.as_str()),
-        ("record-screen",  "openshotx record screen",  hotkeys.record_screen.as_str()),
+        ("capture-area",   "openshotx capture area --notify",   hotkeys.capture_area.as_str()),
+        ("capture-screen", "openshotx capture screen --notify", hotkeys.capture_screen.as_str()),
+        ("capture-window", "openshotx capture window --notify", hotkeys.capture_window.as_str()),
+        ("record-area",    "openshotx record area --notify",    hotkeys.record_area.as_str()),
+        ("record-screen",  "openshotx record screen --notify",  hotkeys.record_screen.as_str()),
     ];
     for (id, command, binding) in &actions {
         let group = format!("openshotx-{}", id);
@@ -93,11 +93,11 @@ pub fn register_kde(hotkeys: &HotkeysConfig) -> Result<(), String> {
 
 pub fn register_xfce(hotkeys: &HotkeysConfig) -> Result<(), String> {
     let actions = [
-        (hotkeys.capture_area.as_str(),   "openshotx capture area"),
-        (hotkeys.capture_screen.as_str(), "openshotx capture screen"),
-        (hotkeys.capture_window.as_str(), "openshotx capture window"),
-        (hotkeys.record_area.as_str(),    "openshotx record area"),
-        (hotkeys.record_screen.as_str(),  "openshotx record screen"),
+        (hotkeys.capture_area.as_str(),   "openshotx capture area --notify"),
+        (hotkeys.capture_screen.as_str(), "openshotx capture screen --notify"),
+        (hotkeys.capture_window.as_str(), "openshotx capture window --notify"),
+        (hotkeys.record_area.as_str(),    "openshotx record area --notify"),
+        (hotkeys.record_screen.as_str(),  "openshotx record screen --notify"),
     ];
     for (binding, command) in &actions {
         std::process::Command::new("xfconf-query")
@@ -132,11 +132,11 @@ pub fn tiling_snippet(hotkeys: &HotkeysConfig, desktop: &Desktop) -> String {
         }
     };
     vec![
-        fmt(&hotkeys.capture_area,   "openshotx capture area"),
-        fmt(&hotkeys.capture_screen, "openshotx capture screen"),
-        fmt(&hotkeys.capture_window, "openshotx capture window"),
-        fmt(&hotkeys.record_area,    "openshotx record area"),
-        fmt(&hotkeys.record_screen,  "openshotx record screen"),
+        fmt(&hotkeys.capture_area,   "openshotx capture area --notify"),
+        fmt(&hotkeys.capture_screen, "openshotx capture screen --notify"),
+        fmt(&hotkeys.capture_window, "openshotx capture window --notify"),
+        fmt(&hotkeys.record_area,    "openshotx record area --notify"),
+        fmt(&hotkeys.record_screen,  "openshotx record screen --notify"),
     ].join("\n")
 }
 
