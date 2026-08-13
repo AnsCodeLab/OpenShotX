@@ -266,10 +266,13 @@ fn toolbar_layout(
     (capture_rect, record_rect)
 }
 
-/// Draw one control-panel button: filled rect with a centered label.
-/// `primary` renders the button matching the action that opened the overlay
-/// with an accent color; the other stays neutral.
-fn draw_button(context: &gtk4::cairo::Context, rect: &ButtonRect, label: &str, primary: bool) {
+/// Draw one control-panel button: filled rect with a centered label,
+/// optionally preceded by a small solid-color dot (drawn as a cairo shape,
+/// never a font glyph -- emoji rendered incorrectly via cairo's toy text
+/// API on this machine).
+/// `primary` renders the button matching the action that opened the
+/// overlay with an accent color; the other stays neutral.
+fn draw_button(context: &gtk4::cairo::Context, rect: &ButtonRect, label: &str, dot_color: Option<(f64, f64, f64)>, primary: bool) {
     if primary {
         context.set_source_rgba(0.20, 0.47, 0.96, 0.95);
     } else {
@@ -285,9 +288,32 @@ fn draw_button(context: &gtk4::cairo::Context, rect: &ButtonRect, label: &str, p
 
     context.set_font_size(14.0);
     context.set_source_rgba(1.0, 1.0, 1.0, 1.0);
-    if let Ok(extents) = context.text_extents(label) {
-        let text_x = rect.x + rect.w / 2.0 - extents.width() / 2.0 - extents.x_bearing();
-        let text_y = rect.y + rect.h / 2.0 - extents.height() / 2.0 - extents.y_bearing();
+    let extents = context.text_extents(label).ok();
+    let text_width = extents.as_ref().map(|e| e.width()).unwrap_or(0.0);
+
+    // A leading dot is drawn as a cairo shape, not a font glyph: cairo's
+    // toy text API doesn't reliably render color emoji (confirmed to
+    // render incorrectly on this machine), so anything beyond plain ASCII
+    // text is drawn directly instead of relying on a font to have the
+    // glyph.
+    const DOT_RADIUS: f64 = 4.0;
+    const DOT_GAP: f64 = 8.0;
+    let dot_width = if dot_color.is_some() { DOT_RADIUS * 2.0 + DOT_GAP } else { 0.0 };
+
+    let group_width = dot_width + text_width;
+    let group_x = rect.x + rect.w / 2.0 - group_width / 2.0;
+    let center_y = rect.y + rect.h / 2.0;
+
+    if let Some((r, g, b)) = dot_color {
+        context.set_source_rgba(r, g, b, 1.0);
+        context.arc(group_x + DOT_RADIUS, center_y, DOT_RADIUS, 0.0, 2.0 * std::f64::consts::PI);
+        let _ = context.fill();
+        context.set_source_rgba(1.0, 1.0, 1.0, 1.0);
+    }
+
+    if let Some(extents) = extents {
+        let text_x = group_x + dot_width - extents.x_bearing();
+        let text_y = center_y - extents.height() / 2.0 - extents.y_bearing();
         context.move_to(text_x, text_y);
         let _ = context.show_text(label);
     }
@@ -718,8 +744,8 @@ fn draw_overlay(
         if st.completed {
             let (capture_rect, record_rect) =
                 toolbar_layout(x, y, width, height, screen_width, screen_height);
-            draw_button(context, &capture_rect, "📷 Capture", st.default_action == AreaAction::Capture);
-            draw_button(context, &record_rect, "⏺ Record", st.default_action == AreaAction::Record);
+            draw_button(context, &capture_rect, "Capture", None, st.default_action == AreaAction::Capture);
+            draw_button(context, &record_rect, "Record", Some((0.90, 0.20, 0.20)), st.default_action == AreaAction::Record);
         }
     } else {
         // Not dragging - darken entire screen slightly
