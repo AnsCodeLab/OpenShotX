@@ -16,6 +16,7 @@ use openshotx::{
     AreaAction,
     AreaPick,
     SelectionArea,
+    SelectionError,
     ocr::{extract_text_from_path, OcrConfig},
     recording::{RecordingConfig, start_recording, copy_to_clipboard as copy_recording_to_clipboard},
     scrolling::{ScrollCaptureConfig, capture_scrolling_pw, save_scrolling_capture},
@@ -247,7 +248,7 @@ async fn run_capture(args: &[String], config: &Config) {
         let capture: CaptureData = if capture_type == "area" {
             if X11Backend::is_supported() {
                 println!("Select an area by dragging the mouse, then choose Capture or Record from the panel.");
-                match select_area(AreaAction::Capture).expect("Failed to show area selection overlay") {
+                match show_area_overlay(AreaAction::Capture) {
                     Some(AreaPick { action: AreaAction::Capture, area, .. }) => {
                         capture_area_pixels(area).expect("Area capture failed")
                     }
@@ -449,6 +450,25 @@ async fn run_capture(args: &[String], config: &Config) {
             .arg(path)
             .spawn()
             .map(|_| ())
+    }
+
+    /// Show the area-selection overlay, handling the "already in progress"
+    /// case (a double-pressed hotkey or a tray+hotkey race) with a clean
+    /// message instead of a panic. Returns `None` for both a real
+    /// cancellation (ESC) and the already-in-progress case -- both mean
+    /// "there is nothing to do", the printed message tells them apart.
+    fn show_area_overlay(default_action: AreaAction) -> Option<AreaPick> {
+        match select_area(default_action) {
+            Ok(pick) => pick,
+            Err(SelectionError::AlreadyInProgress) => {
+                eprintln!("An area selection is already in progress.");
+                None
+            }
+            Err(e) => {
+                eprintln!("Failed to show area selection overlay: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
 
     /// Capture the pixels of `area`, choosing the right backend for this
@@ -685,7 +705,7 @@ async fn run_record(args: &[String], config: &Config) -> Result<(), Box<dyn std:
                     if X11Backend::is_supported() {
                          println!("Select an area to record, then choose Capture or Record from the panel.");
 
-                         match select_area(AreaAction::Record).map_err(|e| format!("Selection failed: {}", e))? {
+                         match show_area_overlay(AreaAction::Record) {
                              Some(AreaPick { action: AreaAction::Record, area, screen_width, screen_height }) => {
                                  rec_config.x = Some(area.x);
                                  rec_config.y = Some(area.y);

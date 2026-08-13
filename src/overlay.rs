@@ -49,6 +49,9 @@ pub enum SelectionError {
 
     #[error("Selection was cancelled by user")]
     Cancelled,
+
+    #[error("An area selection is already in progress")]
+    AlreadyInProgress,
 }
 
 /// Which action to perform with a selected area, chosen from the on-screen
@@ -136,6 +139,56 @@ impl Drop for GdkBackendGuard {
     }
 }
 
+/// Path to the advisory single-instance lock file: only one area-selection
+/// overlay may be open at a time.
+fn overlay_lock_path() -> std::path::PathBuf {
+    dirs::runtime_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("openshotx-overlay.lock")
+}
+
+/// Holds an exclusive, non-blocking `flock` on the overlay lock file for as
+/// long as this guard lives, so a double-pressed hotkey (or tray + hotkey
+/// racing) can't stack multiple overlay windows on top of each other --
+/// each new one drawing input away from whichever the user actually sees.
+/// Deliberately a kernel-level file lock, not GTK's D-Bus GApplication
+/// uniqueness: the kernel releases it automatically if the holding process
+/// dies without calling `drop` (crash, `kill -9`), so a stuck lock can
+/// never require manual cleanup -- unlike GApplication uniqueness, whose
+/// stale-process handoff is exactly what made a second invocation's window
+/// never appear at all (issue #1/#2).
+struct OverlayLock {
+    _file: std::fs::File,
+}
+
+impl OverlayLock {
+    /// Try to acquire the lock. Returns `Ok(None)` if another instance
+    /// already holds it (a selection is already in progress).
+    fn try_acquire() -> std::io::Result<Option<Self>> {
+        use std::os::unix::io::AsRawFd;
+
+        let path = overlay_lock_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path)?;
+
+        // SAFETY: flock is a simple advisory-lock syscall on a valid fd we
+        // just opened ourselves; no aliasing or lifetime hazards.
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result == 0 {
+            Ok(Some(Self { _file: file }))
+        } else {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::WouldBlock {
+                Ok(None)
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
 /// GTK4 overlay window for interactive area selection
 pub struct AreaSelector {
     state: Arc<Mutex<SelectorState>>,
@@ -161,6 +214,20 @@ impl AreaSelector {
     /// Returns `Ok(None)` if user cancelled (ESC).
     /// Returns `Err` if initialization failed
     pub fn run(&self) -> AreaSelectionResult {
+        // Only one overlay may be open at a time: a double-pressed hotkey
+        // or tray+hotkey race must not stack multiple fullscreen windows,
+        // each intercepting input independently of what's visually on top.
+        let _overlay_lock = match OverlayLock::try_acquire() {
+            Ok(Some(lock)) => lock,
+            Ok(None) => return Err(SelectionError::AlreadyInProgress),
+            Err(e) => {
+                return Err(SelectionError::InitError(format!(
+                    "Failed to acquire overlay lock: {}",
+                    e
+                )))
+            }
+        };
+
         let state = self.state.clone();
         let (result_tx, result_rx) = std::sync::mpsc::channel();
 
@@ -1096,5 +1163,19 @@ mod tests {
         assert_eq!(pick.area, SelectionArea { x: 100, y: 100, width: 300, height: 200 });
         assert_eq!(pick.screen_width, 1920);
         assert_eq!(pick.screen_height, 1080);
+    }
+
+    #[test]
+    fn test_overlay_lock_single_instance() {
+        let first = OverlayLock::try_acquire().expect("first acquire should not error");
+        assert!(first.is_some(), "first acquire should succeed when nothing else holds the lock");
+
+        let second = OverlayLock::try_acquire().expect("second acquire should not error");
+        assert!(second.is_none(), "a concurrent acquire must fail while the first guard is still held");
+
+        drop(first);
+
+        let third = OverlayLock::try_acquire().expect("acquire after release should not error");
+        assert!(third.is_some(), "acquire must succeed again once the prior guard is dropped");
     }
 }
