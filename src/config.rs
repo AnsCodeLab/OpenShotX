@@ -49,10 +49,19 @@ pub struct CaptureConfig {
     pub copy_to_clipboard: bool,
     #[serde(default)]
     pub include_cursor: bool,
-    /// Command used to open a screenshot for editing (via --edit).
+    /// Command used to open a screenshot for editing (via --edit, or the
+    /// post-capture preview window's Open button).
     /// Empty falls back to the system default app (xdg-open).
     #[serde(default = "default_editor")]
     pub editor: String,
+    /// Show a small floating preview (thumbnail + Copy/Open/Close) after
+    /// each screenshot, instead of just a desktop notification.
+    #[serde(default = "default_show_preview")]
+    pub show_preview: bool,
+    /// Seconds before the preview auto-dismisses (paused while hovered).
+    /// `0` disables auto-dismiss entirely.
+    #[serde(default = "default_preview_auto_close_seconds")]
+    pub preview_auto_close_seconds: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +114,8 @@ fn default_capture_format() -> CaptureFormat { CaptureFormat::Png }
 fn default_jpeg_quality() -> u8 { 85 }
 fn default_prefix() -> String { "screenshot".to_string() }
 fn default_editor() -> String { String::new() }
+fn default_show_preview() -> bool { true }
+fn default_preview_auto_close_seconds() -> u32 { 5 }
 fn default_copy_to_clipboard() -> bool { true }
 fn default_recording_format() -> RecordingFormat { RecordingFormat::Mp4 }
 fn default_recording_output() -> String { "~/Videos".to_string() }
@@ -135,6 +146,8 @@ impl Default for CaptureConfig {
             copy_to_clipboard: true,
             include_cursor: false,
             editor: String::new(),
+            show_preview: true,
+            preview_auto_close_seconds: 5,
         }
     }
 }

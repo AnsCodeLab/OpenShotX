@@ -10,7 +10,7 @@
 
 use openshotx::{
     backend::{X11Backend, WaylandBackend, CaptureData, DisplayBackend},
-    capture::{save_capture, SaveConfig, ImageFormat, copy_image_to_clipboard},
+    capture::{save_capture, SaveConfig, ImageFormat, copy_image_to_clipboard, open_in_editor},
     select_area,
     select_window,
     AreaAction,
@@ -24,7 +24,7 @@ use openshotx::{
 };
 use openshotx::config::Config;
 use openshotx::gui;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() {
@@ -371,6 +371,13 @@ async fn run_capture(args: &[String], config: &Config) {
         if notify && !run_ocr {
             send_notification("Screenshot saved", &saved_path.display().to_string());
         }
+
+        // Post-capture preview: thumbnail + Copy/Open/Close, auto-dismissing.
+        // Skipped for OCR (has its own text-completion feedback) and when
+        // --open/--edit already launched an editor (redundant with that).
+        if config.capture.show_preview && !run_ocr && !open_after {
+            openshotx::preview::show(&saved_path, &config.capture.editor, config.capture.preview_auto_close_seconds);
+        }
     
         // Run OCR if requested
         if run_ocr {
@@ -429,28 +436,6 @@ async fn run_capture(args: &[String], config: &Config) {
             .spawn();
     }
 
-    /// Open a saved screenshot in an editor.
-    ///
-    /// Uses the configured editor command when set, otherwise falls back to the
-    /// system default handler via `xdg-open`. The child is spawned detached so
-    /// the CLI returns immediately.
-    fn open_in_editor(path: &Path, editor: &str) -> std::io::Result<()> {
-        let (program, args): (&str, Vec<&str>) = if editor.trim().is_empty() {
-            ("xdg-open", vec![])
-        } else {
-            let mut parts = editor.split_whitespace();
-            let prog = parts.next().unwrap_or("xdg-open");
-            (prog, parts.collect())
-        };
-
-        println!("Opening in {}...", program);
-        std::process::Command::new(program)
-            .args(&args)
-            .arg(path)
-            .spawn()
-            .map(|_| ())
-    }
-
     /// Show the area-selection overlay, handling the "already in progress"
     /// case (a double-pressed hotkey or a tray+hotkey race) with a clean
     /// message instead of a panic. Returns `None` for both a real
@@ -500,6 +485,9 @@ async fn run_capture(args: &[String], config: &Config) {
         }
         if notify {
             send_notification("Screenshot saved", &saved_path.display().to_string());
+        }
+        if config.capture.show_preview {
+            openshotx::preview::show(&saved_path, &config.capture.editor, config.capture.preview_auto_close_seconds);
         }
         Ok(())
     }

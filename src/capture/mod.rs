@@ -100,6 +100,28 @@ pub fn copy_image_to_clipboard(path: &Path) -> SaveResult<()> {
     Ok(())
 }
 
+/// Open a saved image in an editor.
+///
+/// Uses the configured editor command when set, otherwise falls back to the
+/// system default handler via `xdg-open`. The child is spawned detached so
+/// the caller returns immediately.
+pub fn open_in_editor(path: &Path, editor: &str) -> std::io::Result<()> {
+    let (program, args): (&str, Vec<&str>) = if editor.trim().is_empty() {
+        ("xdg-open", vec![])
+    } else {
+        let mut parts = editor.split_whitespace();
+        let prog = parts.next().unwrap_or("xdg-open");
+        (prog, parts.collect())
+    };
+
+    println!("Opening in {}...", program);
+    std::process::Command::new(program)
+        .args(&args)
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+}
+
 /// Output image format
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageFormat {

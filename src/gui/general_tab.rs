@@ -1,6 +1,7 @@
 use crate::autostart;
 use crate::config::Config;
 use gtk4::{self as gtk, prelude::*};
+use libadwaita::{self as adw, prelude::*};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -14,14 +15,16 @@ pub fn append_to(
     notebook.append_page(&page, Some(&label));
 }
 
-fn build_page(config: &Rc<RefCell<Config>>, minimize: Option<Rc<dyn Fn()>>) -> gtk::ScrolledWindow {
-    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 16);
-    vbox.set_margin_top(20);
-    vbox.set_margin_bottom(20);
-    vbox.set_margin_start(20);
-    vbox.set_margin_end(20);
+fn build_page(config: &Rc<RefCell<Config>>, minimize: Option<Rc<dyn Fn()>>) -> adw::PreferencesPage {
+    let page = adw::PreferencesPage::new();
 
-    vbox.append(&path_row(
+    // --- Storage group: screenshot and video destination folders ---
+    let storage_group = adw::PreferencesGroup::builder()
+        .title("Storage")
+        .description("Where captured screenshots and recordings are saved")
+        .build();
+
+    storage_group.add(&path_row(
         "Screenshots path",
         &config.borrow().paths.screenshots.clone(),
         {
@@ -30,7 +33,7 @@ fn build_page(config: &Rc<RefCell<Config>>, minimize: Option<Rc<dyn Fn()>>) -> g
         },
     ));
 
-    vbox.append(&path_row(
+    storage_group.add(&path_row(
         "Videos path",
         &config.borrow().paths.videos.clone(),
         {
@@ -39,23 +42,29 @@ fn build_page(config: &Rc<RefCell<Config>>, minimize: Option<Rc<dyn Fn()>>) -> g
         },
     ));
 
-    vbox.append(&autostart_row(config));
+    page.add(&storage_group);
+
+    // --- Startup group: tray autostart and quick minimize action ---
+    let startup_group = adw::PreferencesGroup::builder().title("Startup").build();
+
+    startup_group.add(&autostart_row(config));
 
     // "Minimize to tray" action, placed right under the autostart toggle.
     if let Some(minimize) = minimize {
         let btn = gtk::Button::with_label("Minimize to tray");
         btn.set_halign(gtk::Align::End);
+        btn.set_margin_top(6);
+        btn.set_margin_bottom(6);
         btn.set_tooltip_text(Some(
             "Hide this window to the system tray (minimizes normally if the tray icon isn't available)",
         ));
         btn.connect_clicked(move |_| minimize());
-        vbox.append(&btn);
+        startup_group.add(&btn);
     }
 
-    gtk::ScrolledWindow::builder()
-        .child(&vbox)
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .build()
+    page.add(&startup_group);
+
+    page
 }
 
 /// Switch to enable/disable launching the tray icon on login.
@@ -63,65 +72,41 @@ fn build_page(config: &Rc<RefCell<Config>>, minimize: Option<Rc<dyn Fn()>>) -> g
 /// The autostart `.desktop` file is written/removed immediately on toggle (so
 /// the change takes effect even without pressing Save); the config bool is kept
 /// in sync and persisted on Save.
-fn autostart_row(config: &Rc<RefCell<Config>>) -> gtk::Box {
+fn autostart_row(config: &Rc<RefCell<Config>>) -> adw::SwitchRow {
     let enabled = autostart::is_enabled();
     config.borrow_mut().tray.autostart = enabled;
 
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-
-    let labels = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    labels.set_hexpand(true);
-    let title = gtk::Label::builder()
-        .label("Start tray icon on login")
-        .halign(gtk::Align::Start)
-        .build();
-    let subtitle = gtk::Label::builder()
-        .label("Quick-capture menu in the system tray")
-        .halign(gtk::Align::Start)
-        .css_classes(["caption", "dim-label"])
-        .build();
-    labels.append(&title);
-    labels.append(&subtitle);
-
-    let switch = gtk::Switch::builder()
+    let row = adw::SwitchRow::builder()
+        .title("Start tray icon on login")
+        .subtitle("Quick-capture menu in the system tray")
         .active(enabled)
-        .valign(gtk::Align::Center)
         .build();
 
     let cfg = config.clone();
-    switch.connect_state_set(move |sw, state| {
+    row.connect_active_notify(move |row| {
+        let state = row.is_active();
         let result = if state { autostart::enable() } else { autostart::disable() };
         match result {
             Ok(()) => {
                 cfg.borrow_mut().tray.autostart = state;
-                glib_propagate(false)
             }
             Err(e) => {
                 eprintln!("Failed to update autostart: {}", e);
                 // Revert the switch to the real state on failure.
-                sw.set_active(autostart::is_enabled());
-                glib_propagate(true)
+                row.set_active(autostart::is_enabled());
             }
         }
     });
 
-    row.append(&labels);
-    row.append(&switch);
     row
-}
-
-/// `connect_state_set` expects a `glib::Propagation`; this keeps the call sites
-/// readable. `true` stops further default handling.
-fn glib_propagate(stop: bool) -> gtk::glib::Propagation {
-    if stop {
-        gtk::glib::Propagation::Stop
-    } else {
-        gtk::glib::Propagation::Proceed
-    }
 }
 
 fn path_row<F: Fn(String) + 'static>(label: &str, initial: &str, on_change: F) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    row.set_margin_top(8);
+    row.set_margin_bottom(8);
+    row.set_margin_start(12);
+    row.set_margin_end(12);
 
     let lbl = gtk::Label::builder()
         .label(label)

@@ -9,6 +9,7 @@ use gtk4::{
     prelude::*,
     Application, ApplicationWindow, EventControllerKey, GestureDrag,
 };
+use gdk4_x11::X11Surface;
 use gtk4::gdk::Key;
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -116,6 +117,14 @@ struct SelectorState {
     /// from `start_x`/`start_y` so a stray press over the panel never
     /// clobbers the already-drawn selection rectangle.
     panel_press: Option<(f64, f64)>,
+    /// Set right before capturing pixels for `AreaAction::Capture`, so
+    /// `draw_overlay` renders nothing (fully transparent) instead of the
+    /// darkened background, selection border, and dimension label.
+    /// Capture must happen while this window is still open (see
+    /// `capture_area_pixels`'s doc comment for why), so whatever is
+    /// currently on screen -- including this overlay's own decorations
+    /// -- would otherwise be baked into the screenshot.
+    hidden_for_capture: bool,
 }
 
 impl Default for SelectorState {
@@ -130,6 +139,7 @@ impl Default for SelectorState {
             completed: false,
             default_action: AreaAction::default(),
             panel_press: None,
+            hidden_for_capture: false,
         }
     }
 }
@@ -177,6 +187,51 @@ pub(crate) fn force_x11_backend() -> GdkBackendGuard {
         std::env::set_var("GDK_BACKEND", "x11");
     }
     GdkBackendGuard { prior }
+}
+
+/// Best-effort: ask the window manager to keep `window` above other
+/// windows. GTK4 dropped the toolkit-level "always on top" API (`gtk4::Window`
+/// has no `set_keep_above`) -- Wayland's security model deliberately
+/// disallows arbitrary clients from doing this, and GTK4 removed the
+/// cross-platform API along with it. This sends the standard EWMH
+/// `_NET_WM_STATE_ABOVE` ClientMessage directly, over the same XWayland
+/// connection `force_x11_backend` already relies on for this window to
+/// exist as a real X11 window at all. Silently does nothing if the surface
+/// isn't an X11 surface or the message can't be sent: the caller's window
+/// still works, it just might not stay on top of everything. Shared by the
+/// recording HUD and the post-capture preview window, both small
+/// non-fullscreen windows that want this same best-effort behavior.
+pub(crate) fn request_always_on_top(window: &ApplicationWindow) {
+    let Some(surface) = window.surface() else { return };
+    let Some(x11_surface) = surface.downcast_ref::<X11Surface>() else { return };
+    let xid = x11_surface.xid() as u32;
+
+    let result: Result<(), Box<dyn std::error::Error>> = (|| {
+        use x11rb::connection::Connection;
+        use x11rb::protocol::xproto::{ClientMessageEvent, ConnectionExt, EventMask};
+
+        let (conn, screen_num) = x11rb::connect(None)?;
+        let root = conn.setup().roots[screen_num].root;
+        let wm_state = conn.intern_atom(false, b"_NET_WM_STATE")?.reply()?.atom;
+        let wm_state_above = conn.intern_atom(false, b"_NET_WM_STATE_ABOVE")?.reply()?.atom;
+
+        // EWMH _NET_WM_STATE client message: data[0]=1 (_NET_WM_STATE_ADD),
+        // data[1]=the state atom to add, data[3]=1 (source indication:
+        // normal application).
+        let event = ClientMessageEvent::new(32, xid, wm_state, [1u32, wm_state_above, 0, 1, 0]);
+        conn.send_event(
+            false,
+            root,
+            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+            event,
+        )?;
+        conn.flush()?;
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        eprintln!("Warning: failed to keep window on top: {}", e);
+    }
 }
 
 /// Path to the advisory single-instance lock file: only one area-selection
@@ -320,7 +375,7 @@ impl ButtonRect {
 
 /// Geometry (width, height) of the first monitor, used both to draw the
 /// overlay and to lay out the control panel.
-fn primary_monitor_geometry() -> Option<(f64, f64)> {
+pub(crate) fn primary_monitor_geometry() -> Option<(f64, f64)> {
     let display = gdk::Display::default()?;
     let monitors = display.monitors();
     if monitors.n_items() == 0 {
@@ -441,13 +496,25 @@ fn handle_drag_begin(state: &mut SelectorState, x: f64, y: f64) -> BeginOutcome 
 }
 
 /// Handle a drag-gesture update at `(offset_x, offset_y)` from the press.
+/// `screen` clamps the resulting point to the overlay's own bounds: the
+/// overlay only covers one monitor (issue: multi-monitor unsupported),
+/// but `GestureDrag` keeps delivering motion events even once the
+/// pointer strays past the window's edge onto a second monitor, where
+/// there's no visible selection feedback at all -- without clamping,
+/// the selection silently grows past what the user can see being drawn.
 /// Returns `true` if the selection rectangle changed and needs a redraw.
-fn handle_drag_update(state: &mut SelectorState, offset_x: f64, offset_y: f64) -> bool {
+fn handle_drag_update(state: &mut SelectorState, offset_x: f64, offset_y: f64, screen: Option<(f64, f64)>) -> bool {
     if state.completed || !state.is_dragging {
         return false;
     }
-    state.current_x = state.start_x + offset_x;
-    state.current_y = state.start_y + offset_y;
+    let mut x = state.start_x + offset_x;
+    let mut y = state.start_y + offset_y;
+    if let Some((w, h)) = screen {
+        x = x.clamp(0.0, w);
+        y = y.clamp(0.0, h);
+    }
+    state.current_x = x;
+    state.current_y = y;
     true
 }
 
@@ -519,8 +586,14 @@ fn handle_drag_end(
     if state.completed || !state.is_dragging {
         return EndOutcome::Ignored;
     }
-    state.current_x = state.start_x + offset_x;
-    state.current_y = state.start_y + offset_y;
+    let mut x = state.start_x + offset_x;
+    let mut y = state.start_y + offset_y;
+    if let Some((w, h)) = screen {
+        x = x.clamp(0.0, w);
+        y = y.clamp(0.0, h);
+    }
+    state.current_x = x;
+    state.current_y = y;
     state.is_dragging = false;
 
     let area = SelectionArea {
@@ -547,17 +620,53 @@ fn handle_drag_end(
 /// compositing), so grab the full monitor through the portal and crop
 /// client-side; on native X11, capture the region directly.
 ///
+/// `overlay_screen_w`/`overlay_screen_h` are monitor 0's own dimensions,
+/// the ones the overlay measured `area` against (XWayland's reported
+/// geometry, via `primary_monitor_geometry()`). The portal's screenshot
+/// is not guaranteed to match that resolution -- confirmed on real
+/// hardware: XWayland reports monitor 0 as 3840x2400 while the portal
+/// returns 2560x1600 for it, a uniform 1.5x downscale (device pixel
+/// ratio) -- so `area` is rescaled into the capture's actual pixel space
+/// before cropping. Skipping this made the crop grab the wrong region
+/// entirely, up to nearly the whole frame.
+///
 /// Called synchronously from the overlay's `drag_end` handler, before the
 /// window closes -- see the call site's comment for why deferring this
 /// to the caller (as it used to) silently broke every area screenshot.
-fn capture_area_pixels(area: SelectionArea) -> DisplayResult<CaptureData> {
+fn capture_area_pixels(area: SelectionArea, overlay_screen_h: f64) -> DisplayResult<CaptureData> {
     if WaylandBackend::is_supported() {
-        WaylandBackend::new()?
-            .capture_screen()?
-            .crop(area.x, area.y, area.width, area.height)
+        let full = WaylandBackend::new()?.capture_screen()?;
+        let (x, y, width, height) = scale_area_to_capture(area, overlay_screen_h, full.height);
+        full.crop(x, y, width, height)
     } else {
         X11Backend::new()?.capture_area(area.x, area.y, area.width, area.height)
     }
+}
+
+/// Rescale `area` (measured against monitor 0's own height, `overlay_h`)
+/// into a capture whose actual pixel height is `capture_h`.
+///
+/// With more than one monitor connected, the portal's Screenshot response
+/// composites *every* connected monitor into one image (confirmed on real
+/// dual-monitor hardware: two 3840-wide monitors produced a 5120-wide
+/// capture), so a captured image's WIDTH cannot be used to derive monitor
+/// 0's own device pixel ratio -- it's contaminated by however many other
+/// monitors are attached. Height is reliable as long as monitor 0 is the
+/// tallest connected monitor (the common case for a laptop's built-in
+/// panel next to an external display), so the ratio is derived from
+/// height alone and applied uniformly to both axes -- which is what every
+/// real display actually does (no display scales x and y independently).
+///
+/// Pure so both the single-monitor and multi-monitor real-hardware
+/// mismatches can be regression-tested without a live display or portal.
+fn scale_area_to_capture(area: SelectionArea, overlay_h: f64, capture_h: u32) -> (i32, i32, i32, i32) {
+    let scale = capture_h as f64 / overlay_h;
+    (
+        (area.x as f64 * scale).round() as i32,
+        (area.y as f64 * scale).round() as i32,
+        (area.width as f64 * scale).round() as i32,
+        (area.height as f64 * scale).round() as i32,
+    )
 }
 
 /// Setup the overlay window (standalone function to avoid lifetime issues)
@@ -683,7 +792,7 @@ fn setup_window(
         drawing_area_weak,
         move |_gesture, x, y| {
             let mut st = state_drag.lock();
-            let changed = handle_drag_update(&mut st, x, y);
+            let changed = handle_drag_update(&mut st, x, y, primary_monitor_geometry());
             drop(st);
 
             if changed {
@@ -733,15 +842,26 @@ fn setup_window(
                         window.close();
                     }
                 }
-                EndOutcome::PanelAction(AreaAction::Capture, area, _) => {
-                    // Capture pixels now, synchronously, while this window
-                    // is still open and focused. GNOME's Screenshot portal
-                    // refuses to show its consent dialog once this process
-                    // has no window at all ("Only the focused app is
-                    // allowed to show a system access dialog" -- confirmed
-                    // via journalctl), which is exactly what happens if
-                    // capture waits until after `window.close()` below.
-                    let result = capture_area_pixels(area)
+                EndOutcome::PanelAction(AreaAction::Capture, area, (_sw, sh)) => {
+                    // Hide this window's own decorations (darkened
+                    // background, selection border, dimension label)
+                    // before capturing: pixels must be grabbed while the
+                    // window is still open (see capture_area_pixels's doc
+                    // comment), so whatever is currently rendered would
+                    // otherwise be baked into the screenshot.
+                    state_drag.lock().hidden_for_capture = true;
+                    if let Some(drawing_area) = drawing_area_weak.upgrade() {
+                        drawing_area.queue_draw();
+                    }
+                    // queue_draw() only schedules GTK's internal redraw;
+                    // pump the main loop so it actually runs, then give
+                    // the compositor time to composite and present the
+                    // now-transparent frame -- it doesn't vanish from the
+                    // screen the instant GTK finishes drawing it.
+                    while glib::MainContext::default().iteration(false) {}
+                    std::thread::sleep(std::time::Duration::from_millis(120));
+
+                    let result = capture_area_pixels(area, sh)
                         .map(|data| Some(AreaOutcome::Captured(data)))
                         .map_err(|e| SelectionError::CaptureFailed(e.to_string()));
                     let _ = result_tx_drag.send(result);
@@ -799,6 +919,12 @@ fn draw_overlay(
     state: &Arc<Mutex<SelectorState>>,
 ) {
     let st = state.lock();
+
+    if st.hidden_for_capture {
+        context.set_source_rgba(0.0, 0.0, 0.0, 0.0);
+        let _ = context.paint();
+        return;
+    }
 
     let (screen_width, screen_height) = match primary_monitor_geometry() {
         Some(dims) => dims,
@@ -1083,7 +1209,7 @@ mod tests {
         // 1. Drag out a selection from (100,100) to (400,300).
         assert_eq!(handle_drag_begin(&mut state, 100.0, 100.0), BeginOutcome::StartedDrag);
         assert!(state.is_dragging);
-        assert!(handle_drag_update(&mut state, 300.0, 200.0));
+        assert!(handle_drag_update(&mut state, 300.0, 200.0, screen));
         assert_eq!(
             handle_drag_end(&mut state, 300.0, 200.0, screen),
             EndOutcome::SelectionCompleted
@@ -1128,7 +1254,7 @@ mod tests {
         let screen = Some((1920.0, 1080.0));
 
         handle_drag_begin(&mut state, 100.0, 100.0);
-        handle_drag_update(&mut state, 300.0, 200.0);
+        handle_drag_update(&mut state, 300.0, 200.0, screen);
         handle_drag_end(&mut state, 300.0, 200.0, screen);
 
         let (capture_rect, _) = toolbar_layout(100.0, 100.0, 300.0, 200.0, 1920.0, 1080.0);
@@ -1152,7 +1278,7 @@ mod tests {
         let screen = Some((1920.0, 1080.0));
 
         handle_drag_begin(&mut state, 100.0, 100.0);
-        handle_drag_update(&mut state, 300.0, 200.0);
+        handle_drag_update(&mut state, 300.0, 200.0, screen);
         handle_drag_end(&mut state, 300.0, 200.0, screen);
         assert!(state.completed);
 
@@ -1182,13 +1308,13 @@ mod tests {
         let mut state = SelectorState::default();
         let screen = Some((1920.0, 1080.0));
         handle_drag_begin(&mut state, 100.0, 100.0);
-        handle_drag_update(&mut state, 300.0, 200.0);
+        handle_drag_update(&mut state, 300.0, 200.0, screen);
         handle_drag_end(&mut state, 300.0, 200.0, screen);
         assert!(state.completed);
 
         // A stray drag_update after completion (e.g. a slightly-moving
         // press over the panel) must never touch the frozen selection.
-        assert!(!handle_drag_update(&mut state, 999.0, 999.0));
+        assert!(!handle_drag_update(&mut state, 999.0, 999.0, screen));
         assert_eq!(state.current_x, 400.0);
         assert_eq!(state.current_y, 300.0);
     }
@@ -1204,7 +1330,7 @@ mod tests {
         let screen = Some((1920.7, 1080.4));
 
         handle_drag_begin(&mut state, 100.0, 100.0);
-        handle_drag_update(&mut state, 300.0, 200.0);
+        handle_drag_update(&mut state, 300.0, 200.0, screen);
         handle_drag_end(&mut state, 300.0, 200.0, screen);
 
         let (capture_rect, _) = toolbar_layout(100.0, 100.0, 300.0, 200.0, 1920.7, 1080.4);
@@ -1226,6 +1352,76 @@ mod tests {
         assert_eq!(pick.area, SelectionArea { x: 100, y: 100, width: 300, height: 200 });
         assert_eq!(pick.screen_width, 1920);
         assert_eq!(pick.screen_height, 1080);
+    }
+
+    /// The overlay only ever covers one monitor (multi-monitor
+    /// unsupported); `GestureDrag` keeps delivering motion events past the
+    /// window's edge though, so without clamping a drag that strays onto a
+    /// second monitor silently grows the selection far past what's
+    /// visible. Confirmed on real dual-monitor hardware: a drag that
+    /// wandered onto the second screen produced a selection wider than
+    /// the primary monitor itself.
+    #[test]
+    fn test_drag_update_clamps_to_screen_bounds() {
+        let mut state = SelectorState::default();
+        let screen = Some((1920.0, 1080.0));
+        handle_drag_begin(&mut state, 100.0, 100.0);
+
+        // Pointer strays 1000px past the right/bottom edge of the screen.
+        assert!(handle_drag_update(&mut state, 2500.0, 1500.0, screen));
+        assert_eq!(state.current_x, 1920.0);
+        assert_eq!(state.current_y, 1080.0);
+
+        // And past the left/top edge (start point itself is at 100,100,
+        // so a large negative offset drives current well below zero).
+        assert!(handle_drag_update(&mut state, -5000.0, -5000.0, screen));
+        assert_eq!(state.current_x, 0.0);
+        assert_eq!(state.current_y, 0.0);
+    }
+
+    #[test]
+    fn test_drag_end_clamps_to_screen_bounds() {
+        let mut state = SelectorState::default();
+        let screen = Some((1920.0, 1080.0));
+        handle_drag_begin(&mut state, 100.0, 100.0);
+        handle_drag_update(&mut state, 300.0, 200.0, screen);
+
+        // The final release offset also strays far past the screen edge.
+        let outcome = handle_drag_end(&mut state, 5000.0, 5000.0, screen);
+        assert_eq!(
+            outcome,
+            EndOutcome::SelectionCompleted,
+        );
+        assert_eq!(state.current_x, 1920.0);
+        assert_eq!(state.current_y, 1080.0);
+    }
+
+    #[test]
+    fn test_scale_area_to_capture_no_mismatch_is_identity() {
+        let area = SelectionArea { x: 100, y: 200, width: 300, height: 150 };
+        let (x, y, w, h) = scale_area_to_capture(area, 1080.0, 1080);
+        assert_eq!((x, y, w, h), (100, 200, 300, 150));
+    }
+
+    /// Confirmed real-hardware mismatch: XWayland reports the monitor as
+    /// 3840x2400 (what the overlay measures `area` against), but the
+    /// portal's Screenshot response is 2560x1600 -- a uniform 1.5x
+    /// downscale. Before this fix, `area`'s raw coordinates were cropped
+    /// directly out of the smaller image, grabbing the wrong region.
+    #[test]
+    fn test_scale_area_to_capture_matches_real_hardware_mismatch() {
+        let area = SelectionArea { x: 384, y: 240, width: 480, height: 240 };
+        let (x, y, w, h) = scale_area_to_capture(area, 2400.0, 1600);
+        assert_eq!((x, y, w, h), (256, 160, 320, 160));
+    }
+
+    #[test]
+    fn test_scale_area_to_capture_rounds_to_nearest_pixel() {
+        // 1.5x downscale of an odd-valued rect: exercises the `.round()`,
+        // not just clean multiples.
+        let area = SelectionArea { x: 101, y: 51, width: 301, height: 151 };
+        let (x, y, w, h) = scale_area_to_capture(area, 2400.0, 1600);
+        assert_eq!((x, y, w, h), (67, 34, 201, 101));
     }
 
     #[test]

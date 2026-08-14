@@ -17,11 +17,9 @@
 //! that problem.
 
 use crate::recording::RecordError;
-use gdk4_x11::X11Surface;
 use gst::prelude::*;
 use gstreamer as gst;
 use gtk4::glib;
-use gtk4::glib::object::Cast;
 use gtk4::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -106,49 +104,6 @@ impl HudState {
 fn format_elapsed(d: Duration) -> String {
     let total_secs = d.as_secs();
     format!("{:02}:{:02}", total_secs / 60, total_secs % 60)
-}
-
-/// Best-effort: ask the window manager to keep `window` above other
-/// windows. GTK4 dropped the toolkit-level "always on top" API (`gtk4::Window`
-/// has no `set_keep_above`) -- Wayland's security model deliberately
-/// disallows arbitrary clients from doing this, and GTK4 removed the
-/// cross-platform API along with it. This sends the standard EWMH
-/// `_NET_WM_STATE_ABOVE` ClientMessage directly, over the same XWayland
-/// connection `force_x11_backend` already relies on for this window to
-/// exist as a real X11 window at all. Silently does nothing if the surface
-/// isn't an X11 surface or the message can't be sent: the HUD still works,
-/// it just might not stay on top of everything.
-fn request_always_on_top(window: &gtk4::ApplicationWindow) {
-    let Some(surface) = window.surface() else { return };
-    let Some(x11_surface) = surface.downcast_ref::<X11Surface>() else { return };
-    let xid = x11_surface.xid() as u32;
-
-    let result: Result<(), Box<dyn std::error::Error>> = (|| {
-        use x11rb::connection::Connection;
-        use x11rb::protocol::xproto::{ClientMessageEvent, ConnectionExt, EventMask};
-
-        let (conn, screen_num) = x11rb::connect(None)?;
-        let root = conn.setup().roots[screen_num].root;
-        let wm_state = conn.intern_atom(false, b"_NET_WM_STATE")?.reply()?.atom;
-        let wm_state_above = conn.intern_atom(false, b"_NET_WM_STATE_ABOVE")?.reply()?.atom;
-
-        // EWMH _NET_WM_STATE client message: data[0]=1 (_NET_WM_STATE_ADD),
-        // data[1]=the state atom to add, data[3]=1 (source indication:
-        // normal application).
-        let event = ClientMessageEvent::new(32, xid, wm_state, [1u32, wm_state_above, 0, 1, 0]);
-        conn.send_event(
-            false,
-            root,
-            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
-            event,
-        )?;
-        conn.flush()?;
-        Ok(())
-    })();
-
-    if let Err(e) = result {
-        eprintln!("Warning: failed to keep recording HUD on top: {}", e);
-    }
 }
 
 /// Build and show the HUD window on `app`, wiring its buttons, SIGINT
@@ -288,7 +243,7 @@ fn build_hud(app: &gtk4::Application, pipeline: gst::Pipeline, outcome_slot: Rc<
     });
 
     window.present();
-    request_always_on_top(&window);
+    crate::overlay::request_always_on_top(&window);
 }
 
 /// Run the recording HUD until the pipeline stops (Stop button, window

@@ -65,6 +65,37 @@ pub fn register_gnome(hotkeys: &HotkeysConfig) -> Result<(), String> {
         paths.iter().map(|p| format!("'{}'", p)).collect::<Vec<_>>().join(", "));
     gsettings(&["set", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings", &list])?;
 
+    disable_conflicting_gnome_screenshot_keybindings(hotkeys)?;
+
+    Ok(())
+}
+
+/// GNOME Shell has its own built-in screenshot/recording keybindings, in a
+/// completely separate schema from the custom keybindings above. If one of
+/// them currently uses the same combo as one of ours, GNOME fires *both*
+/// on a single press: its own native tool (a different, always-whole-
+/// desktop capture, saved as "Screenshot.png"/"Screenshot-N.png") runs
+/// alongside openshotx's, producing an unwanted extra file every time.
+/// Confirmed on real hardware: `Print` is bound to both `capture_screen`
+/// and GNOME's own `show-screenshot-ui` by default. Clear the GNOME side
+/// wherever it collides with one of `hotkeys`' bindings -- the standard
+/// move for a tool that wants to own a shortcut GNOME also claims.
+fn disable_conflicting_gnome_screenshot_keybindings(hotkeys: &HotkeysConfig) -> Result<(), String> {
+    let ours = [
+        hotkeys.capture_area.as_str(),
+        hotkeys.capture_screen.as_str(),
+        hotkeys.capture_window.as_str(),
+        hotkeys.record_area.as_str(),
+        hotkeys.record_screen.as_str(),
+    ];
+    let gnome_keys = ["show-screenshot-ui", "screenshot-window", "screenshot", "show-screen-recording-ui"];
+    for key in gnome_keys {
+        let current = gsettings_get("org.gnome.shell.keybindings", key)?;
+        let current_bindings = parse_gvariant_strv(&current);
+        if current_bindings.iter().any(|b| ours.contains(&b.as_str())) {
+            gsettings(&["set", "org.gnome.shell.keybindings", key, "[]"])?;
+        }
+    }
     Ok(())
 }
 

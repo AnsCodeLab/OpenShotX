@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::hotkeys::{self, Desktop, hotkey_display, tiling_snippet};
 use gtk4::{self as gtk, prelude::*};
+use libadwaita::{self as adw, prelude::*};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -10,16 +11,12 @@ pub fn append_to(notebook: &gtk::Notebook, config: &Rc<RefCell<Config>>) {
     notebook.append_page(&page, Some(&label));
 }
 
-fn build_page(config: &Rc<RefCell<Config>>) -> gtk::ScrolledWindow {
-    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    vbox.set_margin_top(20);
-    vbox.set_margin_bottom(20);
-    vbox.set_margin_start(20);
-    vbox.set_margin_end(20);
+fn build_page(config: &Rc<RefCell<Config>>) -> adw::PreferencesPage {
+    let page = adw::PreferencesPage::new();
 
     let desktop = hotkeys::detect_desktop();
 
-    // DE info banner
+    // DE info, shown as the shortcuts group's description
     let de_name = match &desktop {
         Desktop::Gnome    => "GNOME",
         Desktop::Kde      => "KDE",
@@ -29,35 +26,11 @@ fn build_page(config: &Rc<RefCell<Config>>) -> gtk::ScrolledWindow {
         Desktop::Hyprland => "Hyprland",
         Desktop::Unknown  => "Unknown",
     };
-    let banner = gtk::Label::builder()
-        .label(&format!("Detected desktop: {}", de_name))
-        .halign(gtk::Align::Start)
-        .build();
-    vbox.append(&banner);
 
-    // Shortcut rows in a grid
-    let grid = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(16)
+    let shortcuts_group = adw::PreferencesGroup::builder()
+        .title("Shortcuts")
+        .description(format!("Detected desktop: {}", de_name))
         .build();
-
-    // Header row
-    grid.attach(
-        &gtk::Label::builder()
-            .label("Action")
-            .halign(gtk::Align::Start)
-            .css_classes(["caption", "dim-label"])
-            .build(),
-        0, 0, 1, 1,
-    );
-    grid.attach(
-        &gtk::Label::builder()
-            .label("Shortcut")
-            .halign(gtk::Align::Start)
-            .css_classes(["caption", "dim-label"])
-            .build(),
-        1, 0, 1, 1,
-    );
 
     // Action definitions: (display name, getter fn, setter fn)
     struct Action {
@@ -93,43 +66,38 @@ fn build_page(config: &Rc<RefCell<Config>>) -> gtk::ScrolledWindow {
         },
     ];
 
-    // Collect (entry, default_binding_display) for the reset button
-    let mut shortcut_entries: Vec<(gtk::Entry, String)> = Vec::new();
+    // Collect (row, default_binding_display) for the reset button
+    let mut shortcut_entries: Vec<(adw::EntryRow, String)> = Vec::new();
 
-    for (i, action) in actions.into_iter().enumerate() {
-        let row = (i + 1) as i32;
-
-        let action_lbl = gtk::Label::builder()
-            .label(action.name)
-            .halign(gtk::Align::Start)
-            .hexpand(true)
-            .build();
-
+    for action in actions.into_iter() {
         let initial = hotkey_display(&(action.get)(&config.borrow()));
         let default_val = hotkey_display(&(action.get)(&crate::config::Config::default()));
-        let entry = gtk::Entry::builder()
+
+        let row = adw::EntryRow::builder()
+            .title(action.name)
             .text(&initial)
-            .width_chars(18)
             .build();
 
         {
             let cfg = config.clone();
-            entry.connect_changed(move |e| {
-                let raw = display_to_binding(&e.text());
+            row.connect_changed(move |r| {
+                let raw = display_to_binding(&r.text());
                 (action.set)(&mut cfg.borrow_mut(), raw);
             });
         }
 
-        shortcut_entries.push((entry.clone(), default_val));
-        grid.attach(&action_lbl, 0, row, 1, 1);
-        grid.attach(&entry,      1, row, 1, 1);
+        shortcut_entries.push((row.clone(), default_val));
+        shortcuts_group.add(&row);
     }
-    vbox.append(&grid);
+    page.add(&shortcuts_group);
 
     // Footer with Reset + Register button
     let footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     footer.set_halign(gtk::Align::End);
     footer.set_margin_top(8);
+    footer.set_margin_bottom(8);
+    footer.set_margin_start(8);
+    footer.set_margin_end(8);
 
     let reset_btn = gtk::Button::with_label("Reset defaults");
     {
@@ -221,12 +189,11 @@ fn build_page(config: &Rc<RefCell<Config>>) -> gtk::ScrolledWindow {
         }
     }
 
-    vbox.append(&footer);
+    let footer_group = adw::PreferencesGroup::builder().build();
+    footer_group.add(&footer);
+    page.add(&footer_group);
 
-    gtk::ScrolledWindow::builder()
-        .child(&vbox)
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .build()
+    page
 }
 
 /// Converts display format "Super+Shift+4" back to gsettings format "<Super><Shift>4".

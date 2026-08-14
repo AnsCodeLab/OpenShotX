@@ -1,5 +1,6 @@
 use crate::config::{Config, RecordingFormat};
 use gtk4::{self as gtk, prelude::*};
+use libadwaita::{self as adw, prelude::*};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -9,42 +10,42 @@ pub fn append_to(notebook: &gtk::Notebook, config: &Rc<RefCell<Config>>) {
     notebook.append_page(&page, Some(&label));
 }
 
-fn build_page(config: &Rc<RefCell<Config>>) -> gtk::ScrolledWindow {
-    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    vbox.set_margin_top(20);
-    vbox.set_margin_bottom(20);
-    vbox.set_margin_start(20);
-    vbox.set_margin_end(20);
+fn build_page(config: &Rc<RefCell<Config>>) -> adw::PreferencesPage {
+    let page = adw::PreferencesPage::new();
 
-    // Format dropdown: MP4 or WebM
-    let fmt_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let fmt_lbl = gtk::Label::builder()
-        .label("Default format")
-        .hexpand(true)
-        .halign(gtk::Align::Start)
+    // --- Output group: format, output path, filename prefix ---
+    let output_group = adw::PreferencesGroup::builder()
+        .title("Output")
+        .description("How recordings are encoded and named")
         .build();
-    let fmt_combo = gtk::DropDown::from_strings(&["MP4", "WebM"]);
-    let initial = match config.borrow().recording.format {
+
+    let format_model = gtk::StringList::new(&["MP4", "WebM"]);
+    let format_row = adw::ComboRow::builder()
+        .title("Default format")
+        .model(&format_model)
+        .build();
+    let initial_format = match config.borrow().recording.format {
         RecordingFormat::Mp4 => 0u32,
         RecordingFormat::Webm => 1u32,
     };
-    fmt_combo.set_selected(initial);
+    format_row.set_selected(initial_format);
     {
         let cfg = config.clone();
-        fmt_combo.connect_selected_notify(move |dd| {
-            cfg.borrow_mut().recording.format = if dd.selected() == 0 {
+        format_row.connect_selected_notify(move |row| {
+            cfg.borrow_mut().recording.format = if row.selected() == 0 {
                 RecordingFormat::Mp4
             } else {
                 RecordingFormat::Webm
             };
         });
     }
-    fmt_box.append(&fmt_lbl);
-    fmt_box.append(&fmt_combo);
-    vbox.append(&fmt_box);
 
-    // Output path
-    let path_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    // Output path row (custom child: Entry + Browse button, wrapped as a PreferencesGroup child)
+    let path_row = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    path_row.set_margin_top(8);
+    path_row.set_margin_bottom(8);
+    path_row.set_margin_start(12);
+    path_row.set_margin_end(12);
     let path_lbl = gtk::Label::builder()
         .label("Output path")
         .halign(gtk::Align::Start)
@@ -96,103 +97,92 @@ fn build_page(config: &Rc<RefCell<Config>>) -> gtk::ScrolledWindow {
     }
     hbox.append(&entry);
     hbox.append(&browse_btn);
-    path_box.append(&path_lbl);
-    path_box.append(&hbox);
-    vbox.append(&path_box);
+    path_row.append(&path_lbl);
+    path_row.append(&hbox);
 
-    // Prefix row
-    let prefix_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let prefix_lbl = gtk::Label::builder()
-        .label("Filename prefix")
-        .hexpand(true)
-        .halign(gtk::Align::Start)
-        .build();
-    let prefix_entry = gtk::Entry::builder()
+    let prefix_row = adw::EntryRow::builder()
+        .title("Filename prefix")
         .text(config.borrow().recording.prefix.as_str())
         .build();
     {
         let cfg = config.clone();
-        prefix_entry.connect_changed(move |e| {
-            cfg.borrow_mut().recording.prefix = e.text().to_string();
+        prefix_row.connect_changed(move |row| {
+            cfg.borrow_mut().recording.prefix = row.text().to_string();
         });
     }
-    prefix_box.append(&prefix_lbl);
-    prefix_box.append(&prefix_entry);
-    vbox.append(&prefix_box);
 
-    // Highlight cursor row
-    let hl_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let hl_lbl = gtk::Label::builder()
-        .label("Highlight cursor")
-        .hexpand(true)
-        .halign(gtk::Align::Start)
+    output_group.add(&format_row);
+    output_group.add(&path_row);
+    output_group.add(&prefix_row);
+    page.add(&output_group);
+
+    // --- Cursor Highlight group: highlight toggle, color, radius ---
+    let highlight_group = adw::PreferencesGroup::builder()
+        .title("Cursor Highlight")
         .build();
-    let hl_switch = gtk::Switch::new();
-    hl_switch.set_active(config.borrow().recording.highlight_cursor);
+
+    let highlight_cursor = config.borrow().recording.highlight_cursor;
+
+    let hl_row = adw::SwitchRow::builder()
+        .title("Highlight cursor")
+        .subtitle("Draw a highlight around the mouse cursor during recording")
+        .active(highlight_cursor)
+        .build();
     {
         let cfg = config.clone();
-        hl_switch.connect_active_notify(move |sw| {
-            cfg.borrow_mut().recording.highlight_cursor = sw.is_active();
+        hl_row.connect_active_notify(move |row| {
+            cfg.borrow_mut().recording.highlight_cursor = row.is_active();
         });
     }
-    hl_box.append(&hl_lbl);
-    hl_box.append(&hl_switch);
-    vbox.append(&hl_box);
 
-    // Highlight color row
-    let color_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let color_lbl = gtk::Label::builder()
-        .label("Highlight color (hex)")
-        .hexpand(true)
-        .halign(gtk::Align::Start)
-        .build();
-    let color_entry = gtk::Entry::builder()
+    let color_row = adw::EntryRow::builder()
+        .title("Highlight color (hex)")
         .text(config.borrow().recording.highlight_color.as_str())
-        .sensitive(config.borrow().recording.highlight_cursor)
+        .sensitive(highlight_cursor)
         .build();
     {
         let cfg = config.clone();
-        color_entry.connect_changed(move |e| {
-            cfg.borrow_mut().recording.highlight_color = e.text().to_string();
+        color_row.connect_changed(move |row| {
+            cfg.borrow_mut().recording.highlight_color = row.text().to_string();
         });
     }
-    color_box.append(&color_lbl);
-    color_box.append(&color_entry);
-    vbox.append(&color_box);
 
-    // Highlight radius row
-    let radius_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let radius_lbl = gtk::Label::builder()
-        .label("Highlight radius (px)")
-        .hexpand(true)
-        .halign(gtk::Align::Start)
+    let radius_adjustment = gtk::Adjustment::new(
+        config.borrow().recording.highlight_radius as f64,
+        10.0,
+        100.0,
+        5.0,
+        5.0,
+        0.0,
+    );
+    let radius_row = adw::SpinRow::builder()
+        .title("Highlight radius (px)")
+        .subtitle("Size of the cursor highlight circle")
+        .adjustment(&radius_adjustment)
+        .sensitive(highlight_cursor)
         .build();
-    let radius_spin = gtk::SpinButton::with_range(10.0, 100.0, 5.0);
-    radius_spin.set_value(config.borrow().recording.highlight_radius as f64);
-    radius_spin.set_sensitive(config.borrow().recording.highlight_cursor);
     {
         let cfg = config.clone();
-        radius_spin.connect_value_changed(move |sb| {
-            cfg.borrow_mut().recording.highlight_radius = sb.value() as u32;
+        radius_row.connect_value_notify(move |row| {
+            cfg.borrow_mut().recording.highlight_radius = row.value() as u32;
         });
     }
-    radius_box.append(&radius_lbl);
-    radius_box.append(&radius_spin);
-    vbox.append(&radius_box);
 
     // Wire highlight switch to color/radius sensitivity
     {
-        let color_entry_ref = color_entry.clone();
-        let radius_spin_ref = radius_spin.clone();
-        hl_switch.connect_active_notify(move |sw| {
-            let active = sw.is_active();
-            color_entry_ref.set_sensitive(active);
-            radius_spin_ref.set_sensitive(active);
+        let color_row_ref = color_row.clone();
+        let radius_row_ref = radius_row.clone();
+        hl_row.connect_active_notify(move |row| {
+            let active = row.is_active();
+            color_row_ref.set_sensitive(active);
+            radius_row_ref.set_sensitive(active);
         });
     }
 
-    gtk::ScrolledWindow::builder()
-        .child(&vbox)
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .build()
+    highlight_group.add(&hl_row);
+    highlight_group.add(&color_row);
+    highlight_group.add(&radius_row);
+    page.add(&highlight_group);
+
+    page
 }

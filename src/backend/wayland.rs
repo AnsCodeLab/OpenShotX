@@ -59,6 +59,15 @@ impl WaylandBackend {
                 format!("Failed to read screenshot file {}: {}", path.display(), e),
             )))?;
 
+        // GNOME's Screenshot portal backend leaves this file behind as a
+        // side effect (confirmed on real hardware: same mtime/dimensions
+        // as a Print-key native screenshot, saved straight to
+        // ~/Pictures/Screenshot.png, not a temp dir) -- openshotx has
+        // already read what it needs and saves its own properly-named,
+        // cropped copy elsewhere, so this leftover is pure clutter.
+        // Best-effort: never fail the capture over cleanup.
+        let _ = tokio::fs::remove_file(&path).await;
+
         // Parse the image
         let img = image::load_from_memory(&image_data)
             .map_err(|e| DisplayError::CaptureError(format!("Failed to parse screenshot image: {}", e)))?;
