@@ -60,57 +60,48 @@ impl HudState {
         raw.saturating_sub(paused_total)
     }
 
-    /// Resume (if paused) and send EOS, both off the GTK main thread, then
-    /// arm a deadline in case EOS never arrives on the bus. Idempotent: a
-    /// second call while already stopping does nothing.
+    /// Sets the pipeline's `pause_valve` element's `drop` property: `true`
+    /// drops incoming buffers/events (pausing without touching the
+    /// pipeline's own Playing/Paused state), `false` lets them through
+    /// again. A plain GObject property set -- synchronous and always
+    /// fast, safe to call directly from the GTK main thread. No-op if the
+    /// pipeline has no such element (defensive; `build_pipeline` always
+    /// names one `pause_valve`).
+    fn set_valve_dropping(&self, dropping: bool) {
+        if let Some(valve) = self.pipeline.by_name("pause_valve") {
+            gst::prelude::ObjectExt::set_property(&valve, "drop", dropping);
+        }
+    }
+
+    /// Resume (if paused) and send EOS, then arm a deadline in case EOS
+    /// never arrives on the bus. Idempotent: a second call while already
+    /// stopping does nothing.
     ///
-    /// Must not call `pipeline.set_state`/`send_event` directly on the
-    /// calling (GTK main loop) thread: on this pipeline, resuming a paused
-    /// live PipeWire source is not the prompt async call GStreamer's API
-    /// suggests -- it was observed blocking the caller for several
-    /// seconds, long enough for the window manager to flag the app as
-    /// unresponsive, which is exactly the "pause then stop hangs" symptom
-    /// (Stop's own click never even gets delivered to a frozen main
-    /// loop). Running both calls on a worker thread keeps the UI
-    /// responsive regardless of how long GStreamer actually takes, and
-    /// blocking *that* thread on `pipeline.state()` until Playing is
-    /// actually reached (bounded by `state_wait`) before sending EOS keeps
-    /// the ordering `begin_stop`'s doc always relied on -- EOS needs a
-    /// running pipeline to propagate through the encoder/muxer, otherwise
-    /// the file is left with a dangling GOP and no `moov` atom.
+    /// Historical note: this used to call `pipeline.set_state()` directly,
+    /// which on this live PipeWire-backed pipeline was observed to
+    /// sometimes never cleanly settle (`Async` that never resolved, or
+    /// outright `StateChangeError` resuming to Playing) -- stalling the
+    /// GStreamer state lock long enough that the HUD's own 250ms bus-poll
+    /// tick dropped to ~1/second, slow enough for the window manager to
+    /// flag the app as unresponsive. Routing "pause" through the
+    /// `pause_valve` element's `drop` property instead (see
+    /// `set_valve_dropping`) means the pipeline never leaves Playing, so
+    /// none of that applies: this can run inline, no worker thread needed.
     fn begin_stop(&self) {
         if self.stopping.replace(true) {
             return;
         }
-        let was_paused = self.paused.get();
-        if let Some(since) = self.paused_since.take() {
-            self.paused_accum.set(self.paused_accum.get() + since.elapsed());
-        }
-        self.paused.set(false);
-
-        let pipeline = self.pipeline.clone();
-        std::thread::spawn(move || {
-            if was_paused {
-                let _ = pipeline.set_state(gst::State::Playing);
-                let _ = pipeline.state(gst::ClockTime::from_seconds(5));
-            }
-            pipeline.send_event(gst::event::Eos::new());
-        });
+        self.resume_if_paused();
+        self.pipeline.send_event(gst::event::Eos::new());
         self.stop_deadline.set(Some(Instant::now() + Duration::from_secs(5)));
     }
 
-    /// Resume if currently paused. Dispatches the actual `set_state` call
-    /// to a worker thread (see `begin_stop`'s doc for why) since nothing
-    /// needs to wait on it here -- the Resume button just wants the label
-    /// to flip back immediately.
+    /// Resume if currently paused.
     fn resume_if_paused(&self) {
         if !self.paused.get() {
             return;
         }
-        let pipeline = self.pipeline.clone();
-        std::thread::spawn(move || {
-            let _ = pipeline.set_state(gst::State::Playing);
-        });
+        self.set_valve_dropping(false);
         if let Some(since) = self.paused_since.take() {
             self.paused_accum.set(self.paused_accum.get() + since.elapsed());
         }
@@ -126,10 +117,7 @@ impl HudState {
         if self.paused.get() {
             self.resume_if_paused();
         } else {
-            let pipeline = self.pipeline.clone();
-            std::thread::spawn(move || {
-                let _ = pipeline.set_state(gst::State::Paused);
-            });
+            self.set_valve_dropping(true);
             self.paused_since.set(Some(Instant::now()));
             self.paused.set(true);
         }

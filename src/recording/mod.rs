@@ -218,11 +218,20 @@ const PROFILES: &[EncoderProfile] = &[
         muxer: "mp4mux", 
         extension: "mp4"
     },
-    // Cisco OpenH264 — needs h264parse to negotiate caps with mp4mux
+    // Cisco OpenH264 -- needs h264parse to negotiate caps with mp4mux.
+    // complexity=low (fast encoding, not the "medium" default): the encoder
+    // runs on its own streaming thread continuously for the whole
+    // recording, and at "medium" complexity encoding a full-monitor
+    // capture was observed sustaining ~40%+ of a core for the entire
+    // session -- enough contention under this machine's `powersave`
+    // cpufreq governor to starve the HUD's GTK main thread down to ~1
+    // tick/second (should be 4/second), which is what actually produced
+    // the "pause/stop hangs" window-manager-unresponsive symptom, not a
+    // deadlock in the click handlers themselves.
     EncoderProfile {
         name: "H.264 (OpenH264)",
         encoder: "openh264enc",
-        props: "! h264parse",
+        props: "complexity=0 ! h264parse",
         muxer: "mp4mux",
         extension: "mp4"
     },
@@ -294,13 +303,34 @@ pub async fn start_recording(config: RecordingConfig) -> RecordResult<PathBuf> {
     // display available). Either way, once this resolves the pipeline has
     // already reached EOS (or the wait for it timed out) and is ready for
     // the Null cleanup below.
-    let watch_result = match crate::recording_hud::run(pipeline.clone()) {
-        Ok(()) => Ok(()),
-        Err(RecordError::InitError(e)) => {
+    //
+    // Run on tokio's dedicated blocking-thread pool, not inline on this
+    // async task's worker thread: `recording_hud::run` blocks for the
+    // HUD's entire lifetime driving its own nested `gtk4::Application`
+    // main loop, which is exactly the "blocking call inside async fn"
+    // anti-pattern tokio's own docs warn about. Observed effect here: the
+    // HUD's 250ms GLib timer was ticking at ~1/second, not from CPU
+    // starvation (a separate, unrelated GTK process with its own 250ms
+    // timer ticked perfectly even while this same recording ran
+    // concurrently -- ruling out system-wide contention), but from
+    // sharing a thread with tokio's multi-threaded scheduler instead of
+    // running on an isolated one. A throttled HUD main loop responds to
+    // the window manager's liveness ping just as slowly, which is what
+    // actually produced the reported "pause then stop hangs" / "Not
+    // Responding" dialog.
+    let hud_result = tokio::task::spawn_blocking({
+        let pipeline = pipeline.clone();
+        move || crate::recording_hud::run(pipeline)
+    }).await;
+
+    let watch_result = match hud_result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(RecordError::InitError(e))) => {
             eprintln!("Recording HUD unavailable ({}); falling back to terminal mode.", e);
             watch_pipeline_via_ctrl_c(&pipeline).await
         }
-        Err(e) => Err(e),
+        Ok(Err(e)) => Err(e),
+        Err(join_err) => Err(RecordError::GStreamerError(format!("Recording HUD thread panicked: {}", join_err))),
     };
 
     // 7. Cleanup: always attempt this regardless of how watching ended, so
@@ -502,15 +532,26 @@ async fn build_pipeline(config: &RecordingConfig, profile: &EncoderProfile, outp
         get_x11_source(config)?
     };
 
+    // `valve name=pause_valve` gives the HUD's Pause button a way to stop
+    // the recording without ever touching the pipeline's own Playing/
+    // Paused state: on this live PipeWire-backed pipeline,
+    // Playing<->Paused transitions were observed to sometimes never
+    // cleanly settle (`set_state` returning `Async` indefinitely, or
+    // outright `StateChangeError` on the way back to Playing), which
+    // stalled the state lock long enough to starve the HUD's own 250ms
+    // GStreamer-bus poll down to ~1 tick/second -- slow enough for the
+    // window manager to flag the app as unresponsive. Toggling `drop` is
+    // a plain property set: synchronous, always fast, no state machine
+    // involved, so Pause/Resume can run directly on the GTK main thread.
     if config.highlight_cursor {
         Ok(format!(
-            "{} ! videoconvert ! cairooverlay name=co ! videoconvert ! videorate ! queue ! videoconvert ! {} {} ! {} ! filesink location=\"{}\"",
+            "{} ! valve name=pause_valve drop=false ! videoconvert ! cairooverlay name=co ! videoconvert ! videorate ! queue ! videoconvert ! {} {} ! {} ! filesink location=\"{}\"",
             video_source,
             profile.encoder, profile.props, profile.muxer, output_str
         ))
     } else {
         Ok(format!(
-            "{} ! videoconvert ! videorate ! queue ! videoconvert ! {} {} ! {} ! filesink location=\"{}\"",
+            "{} ! valve name=pause_valve drop=false ! videoconvert ! videorate ! queue ! videoconvert ! {} {} ! {} ! filesink location=\"{}\"",
             video_source,
             profile.encoder, profile.props, profile.muxer, output_str
         ))
