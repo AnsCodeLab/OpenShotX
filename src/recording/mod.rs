@@ -13,6 +13,115 @@ pub fn generate_recording_filename(output_dir: &str, prefix: &str, extension: &s
     dir.join(format!("{prefix}_{timestamp}.{extension}"))
 }
 
+/// Path to the recording lock file: only one recording (`screen`/`area`/
+/// `window`, MP4/WebM or GIF) may run at a time. Unlike
+/// `overlay::overlay_lock_path`'s pure mutual-exclusion lock, this file's
+/// content is the holder's PID, so a second `record` invocation -- the
+/// common case being the *same* hotkey pressed again -- can find and
+/// gracefully stop it instead of either stacking a second recording or
+/// silently doing nothing.
+fn recording_lock_path() -> std::path::PathBuf {
+    dirs::runtime_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("openshotx-recording.lock")
+}
+
+/// Holds the exclusive `flock` on the recording lock file for the whole
+/// recording's lifetime. Same auto-release-on-crash guarantee as
+/// `overlay::OverlayLock`: the kernel drops the lock the moment this
+/// process's fd table is torn down, `kill -9` included, so a stuck lock
+/// can never require manual cleanup.
+pub struct RecordingLock {
+    _file: std::fs::File,
+}
+
+enum RecordingLockResult {
+    /// No other recording is running; caller now holds the lock.
+    Acquired(RecordingLock),
+    /// Another recording already holds the lock, running as `pid` (`0` if
+    /// its PID couldn't be read back from the lock file).
+    AlreadyRunning(libc::pid_t),
+}
+
+impl RecordingLock {
+    fn try_acquire() -> std::io::Result<RecordingLockResult> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::os::unix::io::AsRawFd;
+
+        let path = recording_lock_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(&path)?;
+
+        // SAFETY: flock is a simple advisory-lock syscall on a valid fd we
+        // just opened ourselves; no aliasing or lifetime hazards.
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result == 0 {
+            file.set_len(0)?;
+            file.seek(SeekFrom::Start(0))?;
+            write!(file, "{}", std::process::id())?;
+            file.flush()?;
+            Ok(RecordingLockResult::Acquired(Self { _file: file }))
+        } else {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::WouldBlock {
+                let mut contents = String::new();
+                let _ = file.read_to_string(&mut contents);
+                let pid: libc::pid_t = contents.trim().parse().unwrap_or(0);
+                Ok(RecordingLockResult::AlreadyRunning(pid))
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
+/// Outcome of [`acquire_or_signal_stop`].
+pub enum StartRecordingLock {
+    /// No other recording was running (or the lock file itself was
+    /// unavailable): proceed. Carries the held lock when there is one to
+    /// hold onto for the recording's lifetime; `None` only in the
+    /// best-effort I/O-failure case, where recording proceeds unprotected.
+    Proceed(Option<RecordingLock>),
+    /// Another recording was already running and has now been sent
+    /// `SIGINT` to stop it gracefully. The caller must not start a new
+    /// recording.
+    SignaledStop,
+}
+
+/// Acquire the recording lock, or -- if a recording is already running --
+/// send it `SIGINT` (the same graceful-stop signal the HUD's Stop button
+/// and the tray's "Stop Recording" use) so the caller starts nothing new.
+/// This is what gives a `record` hotkey "press to start, press again to
+/// stop" behavior: without it, a second press just launched an unrelated
+/// overlapping recording, and the first one had no reachable way to stop
+/// short of a hard kill (which leaves an unplayable file with no `moov`
+/// atom ever written).
+///
+/// On lock-file I/O failure the recording proceeds anyway without
+/// toggle-stop protection (best-effort; matches `OverlayLock`'s posture of
+/// never blocking the feature over an advisory lock).
+pub fn acquire_or_signal_stop() -> StartRecordingLock {
+    match RecordingLock::try_acquire() {
+        Ok(RecordingLockResult::Acquired(lock)) => StartRecordingLock::Proceed(Some(lock)),
+        Ok(RecordingLockResult::AlreadyRunning(pid)) if pid > 0 => {
+            println!("A recording is already in progress -- stopping it.");
+            // SAFETY: sending a signal to a pid we read from our own lock file.
+            unsafe { libc::kill(pid, libc::SIGINT) };
+            StartRecordingLock::SignaledStop
+        }
+        Ok(RecordingLockResult::AlreadyRunning(_)) => {
+            eprintln!("Error: a recording is already in progress (could not read its PID to stop it).");
+            StartRecordingLock::SignaledStop
+        }
+        Err(e) => {
+            eprintln!("Warning: recording lock unavailable ({}); proceeding without toggle-stop.", e);
+            StartRecordingLock::Proceed(None)
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum RecordError {
     #[error("GStreamer initialization failed: {0}")]

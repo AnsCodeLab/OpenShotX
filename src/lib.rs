@@ -18,5 +18,5 @@ pub use backend::{DisplayBackend, DisplayError, DisplayResult, CaptureData, Pixe
 pub use capture::{save_capture, quick_save, SaveConfig, ImageFormat, SaveError, SaveResult, copy_image_to_clipboard, open_in_editor};
 pub use overlay::{select_area, select_window, AreaSelector, AreaAction, AreaPick, AreaOutcome, AreaSelectionResult, SelectionArea, SelectionError};
 pub use ocr::{OcrConfig, OcrOutput, OcrError, OcrResult, extract_text, extract_text_from_path, copy_to_clipboard};
-pub use recording::{RecordingConfig, start_recording, RecordError, RecordResult};
+pub use recording::{RecordingConfig, start_recording, RecordError, RecordResult, RecordingLock, StartRecordingLock, acquire_or_signal_stop};
 pub use scrolling::{ScrollCaptureConfig, ScrollCaptureResult, ScrollError, ScrollResult, capture_scrolling_pw, save_scrolling_capture};

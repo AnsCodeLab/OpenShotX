@@ -504,6 +504,11 @@ async fn run_capture(args: &[String], config: &Config) {
         screen_height: u32,
         notify: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let _recording_lock = match openshotx::recording::acquire_or_signal_stop() {
+            openshotx::recording::StartRecordingLock::SignaledStop => return Ok(()),
+            openshotx::recording::StartRecordingLock::Proceed(lock) => lock,
+        };
+
         let ext = match config.recording.format {
             openshotx::config::RecordingFormat::Mp4 => "mp4",
             openshotx::config::RecordingFormat::Webm => "webm",
@@ -642,6 +647,18 @@ async fn run_record(args: &[String], config: &Config) -> Result<(), Box<dyn std:
                 }
             }
         }
+
+        // Toggle-stop: if a recording is already running (the common case
+        // being the same hotkey pressed again), signal it to stop
+        // gracefully instead of stacking an unrelated second recording or
+        // making the user hunt down the HUD window. Must happen before any
+        // area/window selection UI below -- there is no point drawing a
+        // fresh region just to discard it because we're only stopping the
+        // other recording.
+        let _recording_lock = match openshotx::recording::acquire_or_signal_stop() {
+            openshotx::recording::StartRecordingLock::SignaledStop => return Ok(()),
+            openshotx::recording::StartRecordingLock::Proceed(lock) => lock,
+        };
     
                 let mut rec_config = RecordingConfig::default();
 
