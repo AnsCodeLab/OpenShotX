@@ -60,24 +60,57 @@ impl HudState {
         raw.saturating_sub(paused_total)
     }
 
-    /// Resume if currently paused (EOS needs a running pipeline to
-    /// propagate), then send EOS and arm a deadline in case it never
-    /// arrives on the bus. Idempotent: a second call while already
-    /// stopping does nothing.
+    /// Resume (if paused) and send EOS, both off the GTK main thread, then
+    /// arm a deadline in case EOS never arrives on the bus. Idempotent: a
+    /// second call while already stopping does nothing.
+    ///
+    /// Must not call `pipeline.set_state`/`send_event` directly on the
+    /// calling (GTK main loop) thread: on this pipeline, resuming a paused
+    /// live PipeWire source is not the prompt async call GStreamer's API
+    /// suggests -- it was observed blocking the caller for several
+    /// seconds, long enough for the window manager to flag the app as
+    /// unresponsive, which is exactly the "pause then stop hangs" symptom
+    /// (Stop's own click never even gets delivered to a frozen main
+    /// loop). Running both calls on a worker thread keeps the UI
+    /// responsive regardless of how long GStreamer actually takes, and
+    /// blocking *that* thread on `pipeline.state()` until Playing is
+    /// actually reached (bounded by `state_wait`) before sending EOS keeps
+    /// the ordering `begin_stop`'s doc always relied on -- EOS needs a
+    /// running pipeline to propagate through the encoder/muxer, otherwise
+    /// the file is left with a dangling GOP and no `moov` atom.
     fn begin_stop(&self) {
         if self.stopping.replace(true) {
             return;
         }
-        self.resume_if_paused();
-        self.pipeline.send_event(gst::event::Eos::new());
+        let was_paused = self.paused.get();
+        if let Some(since) = self.paused_since.take() {
+            self.paused_accum.set(self.paused_accum.get() + since.elapsed());
+        }
+        self.paused.set(false);
+
+        let pipeline = self.pipeline.clone();
+        std::thread::spawn(move || {
+            if was_paused {
+                let _ = pipeline.set_state(gst::State::Playing);
+                let _ = pipeline.state(gst::ClockTime::from_seconds(5));
+            }
+            pipeline.send_event(gst::event::Eos::new());
+        });
         self.stop_deadline.set(Some(Instant::now() + Duration::from_secs(5)));
     }
 
+    /// Resume if currently paused. Dispatches the actual `set_state` call
+    /// to a worker thread (see `begin_stop`'s doc for why) since nothing
+    /// needs to wait on it here -- the Resume button just wants the label
+    /// to flip back immediately.
     fn resume_if_paused(&self) {
         if !self.paused.get() {
             return;
         }
-        let _ = self.pipeline.set_state(gst::State::Playing);
+        let pipeline = self.pipeline.clone();
+        std::thread::spawn(move || {
+            let _ = pipeline.set_state(gst::State::Playing);
+        });
         if let Some(since) = self.paused_since.take() {
             self.paused_accum.set(self.paused_accum.get() + since.elapsed());
         }
@@ -93,7 +126,10 @@ impl HudState {
         if self.paused.get() {
             self.resume_if_paused();
         } else {
-            let _ = self.pipeline.set_state(gst::State::Paused);
+            let pipeline = self.pipeline.clone();
+            std::thread::spawn(move || {
+                let _ = pipeline.set_state(gst::State::Paused);
+            });
             self.paused_since.set(Some(Instant::now()));
             self.paused.set(true);
         }
